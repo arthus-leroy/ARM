@@ -224,12 +224,23 @@ int find_login(const char *login)
     return -1;
 }
 
+
+unsigned get_login_entry_size(const unsigned char *buff)
+{
+    const unsigned char login_size     = *(buff + 0);
+    const unsigned char pwd_size     = *(buff + 1);
+
+    return (buff + 2) + login_size + pwd_size;
+}
+
 void delete_login_at(const unsigned i)
 {
-    const unsigned char login_size = *(password_buffer + i);
-    const unsigned char pwd_size = *(password_buffer + i + 1);
+	unsigned buff = password_buffer + i;
 
-    strcpy(password_buffer + i, password_buffer + 2 + i + login_size + pwd_size);
+    const unsigned char login_size 	= *(buff + 0);
+    const unsigned char pwd_size 	= *(buff + 1);
+
+    strcpy(buff, buff + get_login_entry_size(buff));
 }
 
 int delete_login(const char *login)
@@ -243,22 +254,21 @@ int delete_login(const char *login)
     return 0;
 }
 
-void add_login(const char *login, const char *pwd)
+// creds = "login\0password\0"
+void add_login(const char *creds)
 {
-    delete_login(login);
+    delete_login(creds);
 
     unsigned *total_len = (unsigned*) password_buffer;
 
-    unsigned char *buff = password_buffer + *total_len + sizeof(unsigned);
+    unsigned char *buff = password_buffer + sizeof(unsigned) + *total_len;
 
-    unsigned char login_size = strlen(login);
-    unsigned char pwd_size = strlen(pwd);
+    unsigned char login_size = strlen(creds);
+    unsigned char pwd_size = strlen(creds + login_size);
 
     *(buff + 0) = login_size;
     *(buff + 1) = pwd_size;
-
-    strcpy(buff + 2, login);
-    strcpy(buff + 2 + login_size, pwd);
+    memcpy(buff + 2, creds, login_size + pwd_size);
 
     *total_len += 2 + login_size + pwd_size;
 }
@@ -268,12 +278,9 @@ unsigned char *get_password(const unsigned char *buff)
     return buff + 2 + *buff;    // 2 + login_size
 }
 
-unsigned get_login_entry_size(const unsigned char *buff)
+unsigned get_password_len(const unsigned char *buff)
 {
-    const unsigned char login_size     = *(buff + 0);
-    const unsigned char pwd_size     = *(buff + 1);
-
-    return (buff + 2) + login_size + pwd_size;
+	return *(buff + 1);
 }
 
 const int use_password[] = { 0, 1, 0, 1, 1, 1, 1 };
@@ -315,23 +322,22 @@ int process_request(const int op)
             break;
 
         case ADD_PWD:
-            // add_login(login, password)
-            add_login(args, args + strlen(args));
+            add_login(args);
             break;
 
         case GET_PWD:
-            // find_login(login)
             if ((i = find_login(args)) == -1)
             {
                 set_tx_error(LOGIN_NOT_EXISTS);
                 break;
             }
 
-            add_tx_args(0, get_password(password_buffer + i), get_login_entry_size());
+            add_tx_args(0,
+            		    get_password(password_buffer + i),
+						get_password_len(password_buffer + i));
             break;
 
         case DEL_PWD:
-            // delete_login(login)
             if (delete_login(args))
                 set_tx_error(LOGIN_NOT_EXISTS);
             break;
