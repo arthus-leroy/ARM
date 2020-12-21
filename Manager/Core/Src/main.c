@@ -33,8 +33,11 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 # define MASTER_PASSWORD_SIZE 128
-# define KEY_SIZE 256
+# define PUBLIC_KEY_SIZE crypto_box_PUBLICKEYBYTES
+# define PRIVATE_KEY_SIZE crypto_box_SECRETKEYBYTES
+# define SIGN_SIZE crypto_sign_BYTES
 # define HASH_SIZE crypto_hash_sha256_BYTES
+# define DMA_BUFFER_SIZE 1024
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -85,8 +88,12 @@ enum TX_ERR
 };
 
 unsigned char master_password[MASTER_PASSWORD_SIZE];
-unsigned char public_key[KEY_SIZE];
-unsigned char private_key[KEY_SIZE];
+unsigned char public_key[PUBLIC_KEY_SIZE];
+unsigned char private_key[PRIVATE_KEY_SIZE];
+unsigned long long sign_len;
+
+// FIXME: get the right pointer (a place or a way where ram won't be rewritten)
+unsigned char *password_buffer = 0x20008000;
 
 // LEN, OP, ARGS..., HASH
 unsigned char tx[1024];
@@ -104,21 +111,47 @@ void assert(const char *code, const char *file, const unsigned line, const int r
     }
 }
 
-int get_args_size(void)
+int sma_sent;
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
-    return rx[0] - 2 - HASH_SIZE;   // remove LEN, OP and HASH
+    dma_sent = 0;
 }
 
-unsigned char *get_args(void)
+/// State of bootlader State Machine
+unsigned char dma1[DMA_BUFFER_SIZE];
+unsigned char dma2[DMA_BUFFER_SIZE];
+
+/// Current dma buffer
+unsigned char *buff = dma2;
+/// Previous dma buffer (received)
+unsigned char *prev = NULL;
+int dma_received = 0;
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    dma_received = 1;
+}
+
+int get_rx_args_size(void)
+{
+    return rx[0];
+}
+
+unsigned char *get_rx_args(void)
 {
     return rx + 2;
 }
 
 void set_tx_header(const unsigned char err)
 {
-    tx[0] = 3;      // LEN
+    tx[0] = 0;      // LEN
     tx[1] = rx[1];  // OP
     tx[2] = err;    // ERR
+}
+
+void set_tx_error(const unsigned char err)
+{
+    tx[2] = err;
 }
 
 void add_tx_arg(const unsigned char arg)
@@ -136,16 +169,119 @@ void add_tx_args(const unsigned begin, unsigned char *buff, const unsigned size)
 void add_tx_hash(void)
 {
     // args begin at 3, after LEN, OP, ERROR
-    crypto_hash_sha256(tx + tx[0], tx + 3, tx[0] - 3);
-    tx[0] += HASH_SIZE;
+    crypto_hash_sha256(tx + tx[0] + 3, tx + 3, tx[0]);
 }
 
-int use_password[] = { 0, 1, 0, 1, 1, 1, 1 };
+/// Check integrity of message by summing the hash
+int check_integrity(unsigned char val)
+{
+    unsigned sum = 0;
+    for (unsigned i = 0; i < HASH_SIZE; i++)
+        sum += hash[i];
+
+    return val != (unsigned char) sum;
+}
+
+/**
+ *     As we can't really use malloc, here is my data architecture attempt :
+ *         total size (unsigned, 4 bytes)
+ *
+ *         login1 size (unsigned char, 1 byte)
+ *         password1 size (unsigned char, 1 byte)
+ *         login1 (char[], 1-255 bytes)
+ *         password1 (char[], 1-255 bytes)
+ *
+ *         ...
+ *
+ *         loginN size (unsigned char, 1 byte)
+ *         passwordN size (unsigned char, 1 byte)
+ *         loginN (char[], 1-255 bytes)
+ *         passwordN (char[], 1-255 bytes)
+ */
+int find_login(const char *login)
+{
+    // total size doesn't take its own size into account
+    const unsigned total_size = (*(unsigned*) password_buffer) + sizeof(unsigned);
+
+    int i = sizeof(unsigned);
+    while (i < total_size)
+    {
+        const unsigned char login_size = *(password_buffer + i);
+        i+= sizeof(unsigned char);
+        ASSERT(login_size != 0);
+
+        const unsigned char pwd_size = *(password_buffer + i);
+        i += sizeof(char) + sizeof(char);
+        ASSERT(pwd_size != 0);
+
+        const char *login_buff = password_buffer + i;
+        if (strcmp(login_buff, login) == 0)
+            return i;
+
+        i += login_size + pwd_size;
+    }
+
+    return -1;
+}
+
+void delete_login_at(const unsigned i)
+{
+    const unsigned char login_size = *(password_buffer + i);
+    const unsigned char pwd_size = *(password_buffer + i + 1);
+
+    strcpy(password_buffer + i, password_buffer + 2 + i + login_size + pwd_size);
+}
+
+int delete_login(const char *login)
+{
+    const unsigned i = find_login(login);
+    if (i == -1)
+        return 1;
+
+    delete_login_at(i);
+
+    return 0;
+}
+
+void add_login(const char *login, const char *pwd)
+{
+    delete_login(login);
+
+    unsigned *total_len = (unsigned*) password_buffer;
+
+    unsigned char *buff = password_buffer + *total_len + sizeof(unsigned);
+
+    unsigned char login_size = strlen(login);
+    unsigned char pwd_size = strlen(pwd);
+
+    *(buff + 0) = login_size;
+    *(buff + 1) = pwd_size;
+
+    strcpy(buff + 2, login);
+    strcpy(buff + 2 + login_size, pwd);
+
+    *total_len += 2 + login_size + pwd_size;
+}
+
+unsigned char *get_password(const unsigned char *buff)
+{
+    return buff + 2 + *buff;    // 2 + login_size
+}
+
+unsigned get_login_entry_size(const unsigned char *buff)
+{
+    const unsigned char login_size     = *(buff + 0);
+    const unsigned char pwd_size     = *(buff + 1);
+
+    return (buff + 2) + login_size + pwd_size;
+}
+
+const int use_password[] = { 0, 1, 0, 1, 1, 1, 1 };
 int process_request(const int op)
 {
     if (use_password[op]
         && (get_args_size() < MASTER_PASSWORD_SIZE
-        || strncmp(get_args, master_password, MASTER_PASSWORD_SIZE)))
+        || strncmp(get_args(), master_password, MASTER_PASSWORD_SIZE)))
     {
         set_tx_header(WRONG_PWD);
         return 1;
@@ -153,43 +289,51 @@ int process_request(const int op)
 
     set_tx_header(NO_ERR);
 
+    const unsigned char *args = get_rx_args();
+    const unsigned arg_size = get_rx_args_size();
+
+    int i;
     switch (op)
     {
         case NOP:
             return 0;
 
         case MOD_MAST_PWD:
-            if (get_args_size() < 2 * MASTER_PASSWORD_SIZE)
-                return 0;
-
-            memcpy(master_password, get_args() + MASTER_PASSWORD_SIZE, MASTER_PASSWORD_SIZE);
-            return 1;
+            if (arg_size < 2 * MASTER_PASSWORD_SIZE)
+                set_tx_error(CORRUPT);
+            else
+                memcpy(master_password, args + MASTER_PASSWORD_SIZE, MASTER_PASSWORD_SIZE);
+            break;
 
         case SEND_KEY:
-            add_tx_args(0, public_key, KEY_SIZE);
+            add_tx_args(0, public_key, PUBLIC_KEY_SIZE);
             break;
 
         case SIGN:
-            // encrypt hash
-            // send encrypted hash
+            crypto_sign(tx + 3, &sign_len, hash, HASH_LEN, private_key);
+            tx[0] += sign_len;
             break;
 
         case ADD_PWD:
-            // TODO: find a way to implement string vector under stm32
-            // search password in the list
-            // if password exist, replace it and break
-            // add the password to the list
+            // add_login(login, password)
+            add_login(args, args + strlen(args));
             break;
 
         case GET_PWD:
-            // search login in list
-            // if password is not found send error
-            // send password
+            // find_login(login)
+            if ((i = find_login(args)) == -1)
+            {
+                set_tx_error(LOGIN_NOT_EXISTS);
+                break;
+            }
+
+            add_tx_args(0, get_password(password_buffer + i), get_login_entry_size());
             break;
 
         case DEL_PWD:
-            // search password in the list
-            // if password exist, delete it else send error
+            // delete_login(login)
+            if (delete_login(args))
+                set_tx_error(LOGIN_NOT_EXISTS);
             break;
 
         case QUIT:
@@ -200,6 +344,20 @@ int process_request(const int op)
     }
 
     return 0;
+}
+
+void process_dma_frame(cryto_hash_sha256_state *hash, const int size)
+{
+    dma_received = 0;
+
+    HAL_UART_Receive_DMA(&huart1, cur, size);
+    if (prev)
+        crypto_hash_sha256_update(hash, prev, DMA_BUFFER_SIZE);
+
+    prev = cur;
+
+    while (dma_received == 0)
+        ;
 }
 /* USER CODE END 0 */
 
@@ -235,25 +393,40 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USART2_Init();
   /* USER CODE BEGIN 2 */
-      // FIXME: generate key
+    // FIXME: generate key
+    crypto_box_keypair(public_key, private_key);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-      while (1)
+    while (1)
     {
-          // TODO: fetch header
+        // TODO: fetch header
+        dma_received = 0;
+        HAL_UART_Receive_DMA(&huart1, rx, 2);    // receive LEN and OP
+        while (dma_received == 0)
+            ;
 
-          // TODO: fetch body
+        unsigned len = rx[0];
 
-          unsigned char op = rx[1];
-          if (process_request(op))
-          {
-              add_tx_hash();
-              HAl_UART_Transmit_DMA(&huart1, tx, tx[0]);
-          }
-          else if (op == QUIT)
-              return 0;
+        // TODO: fetch body
+        while (len > DMA_BUFFER_SIZE)    // OP == SIGN
+            process_dma_frame(state, DMA_BUFFER_SIZE);
+
+        if (len > 0)
+            process_dma_frame(state, len);
+
+        if (prev)
+            crypto_hash_sha256_update(&hash, prev, len);
+
+        const unsigned char op = rx[1];
+        if (process_request(op))
+        {
+            add_tx_hash();
+            HAl_UART_Transmit_DMA(&huart1, tx, tx[0]);
+        }
+        else if (op == QUIT)
+            return 0;
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
