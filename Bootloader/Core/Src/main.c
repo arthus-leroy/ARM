@@ -22,7 +22,10 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+# include <stdio.h>
 
+# include "Crypto/crypto_hash_sha256.h"
+# include "Crypto/crypto_sign.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -32,8 +35,10 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-# define PROGRAM_FLASH 0x8004000
-# define DMA_BUFFER_SIZE 0x1000
+# define DMA_BUFFER_SIZE	0x1000
+# define BASE_FLASH			0x8000000
+# define PROGRAM_FLASH		0x8060000
+# define SECTOR_SIZE		0x2000
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -70,42 +75,51 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 
 /// State of bootlader State Machine
 unsigned char dma1[DMA_BUFFER_SIZE];
-unsigned dma2[DMA_BUFFER_SIZE];
+unsigned char dma2[DMA_BUFFER_SIZE];
 
 /// Current dma buffer
 unsigned char *buff = dma2;
 /// Previous dma buffer (received)
-unsigned *prev = NULL;
-int dma_received = 0;
+unsigned char *prev = NULL;
 
+unsigned char public_key[crypto_sign_PUBLICKEYBYTES];
+
+unsigned program_flash = PROGRAM_FLASH;
+
+int dma_received = 0;
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     dma_received = 1;
 }
 
-void process_dma_program(unsigned *buff,
-                         cryto_hash_sha256_state *hash,
+void process_dma_program(struct crypto_hash_sha256_state *hash,
+						 unsigned char *buff,
                          int size)
 {
     if (buff)
     {
-        crypto_hash_sha256_update(&hash, buff, size);
-        for (int i = 0; i < size / sizeof(unsigned) + 1; i++)
+    	const unsigned s = size / sizeof(unsigned)
+    					 + (size % sizeof(unsigned) != 0);
+        crypto_hash_sha256_update(hash, buff, size);
+        for (int i = 0; i < s; i++)
             HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD,
-                              PROGRAM_FLASH + i * sizeof(unsigned),
-                              prev[i]);
+                              program_flash + i * sizeof(unsigned),
+                              ((unsigned*) prev)[i]);
+
+        program_flash += size;
     }
 }
 
-void received_dma_program(cryto_hash_sha256_state *hash,
-                          const int buff_size)
+void receive_dma_program(struct crypto_hash_sha256_state *hash,
+                         const int buff_size)
 {
     dma_received = 0;
 
     HAL_UART_Receive_DMA(&huart1, buff, buff_size);
-    process_dma_program(prev, buff_size, hash);
+    process_dma_program(hash, prev, DMA_BUFFER_SIZE);
 
-    while (dma_received == 0);
+    while (dma_received == 0)
+    	;
 
     // switch buffer
     prev = buff;
@@ -154,37 +168,45 @@ int main(void)
     {
         HAL_FLASH_Unlock();
 
-        FLASH_MassErase(FLASH_VOLTAGE_RANGE_3, FLASH_BANK_1);
-        while (FLASH->SR & FLASH_SR_BSY);
-        // Check for error ?
-
-        cryto_hash_sha256_state hash;
+        crypto_hash_sha256_state hash;
         crypto_hash_sha256_init(&hash);
 
-        // Receive and write the program
+        // Erase sector 7 (128 KB), should be enough
+		FLASH_Erase_Sector(7, FLASH_VOLTAGE_RANGE_3);
+//		if ( != HAL_OK)
+//			printf("Couldn't erase flash\n\r", sector);
+		while (FLASH->SR & FLASH_SR_BSY)
+			;
+
+        // STEP 1: Get size of the program
         unsigned size;
         dma_received = 0;
         HAL_UART_Receive_DMA(&huart1, (unsigned char*) &size, sizeof(unsigned));
-        while (dma_received == 0);
+        while (dma_received == 0)
+        	;
 
+        // STEP 2: Receive and write the program
         for (; size >= DMA_BUFFER_SIZE; size -= DMA_BUFFER_SIZE)
-            received_dma_program(&hash, DMA_BUFFER_SIZE);
+            receive_dma_program(&hash, DMA_BUFFER_SIZE);
 
         // receive last dma
-        received_dma_program(&hash, size);
+        receive_dma_program(&hash, size);
         // process last dma
-        process_DMA_reception(prev, &hash, size);
+        process_dma_program(&hash, prev, size);
         HAL_FLASH_Lock();
 
+        // STEP 3: Received encrypted hash
         dma_received = 0;
         unsigned char program_crypted_hash[crypto_hash_sha256_BYTES];
         HAL_UART_Receive_DMA(&huart1, program_crypted_hash, crypto_hash_sha256_BYTES);
-        while (dma_received == 0);
+        while (dma_received == 0)
+        	;
 
         dma_received = 0;
         unsigned char program_hash[crypto_hash_sha256_BYTES];
         HAL_UART_Receive_DMA(&huart1, program_hash, crypto_hash_sha256_BYTES);
-        while (dma_received == 0);
+        while (dma_received == 0)
+        	;
 
         // TODO: Check HASH
         unsigned char sha256_hash[crypto_hash_sha256_BYTES];
@@ -197,16 +219,14 @@ int main(void)
             continue;
         }*/
 
-        // TODO: Check crypted HASH
+        // TODO: Check encrypted HASH
         // decrypt program_crypted_hash with public key
-        // FIXME
-
-        // compare hash
-/*        if (strncmp(sha256_hash, program_crypted_hash, crypto_hash_sha256_BYTES))
+        if (crypto_sign_verify_detached(program_crypted_hash, program_hash,
+        								crypto_hash_sha256_BYTES, public_key))
         {
-            printf("\n\r");
+            printf("Invalid hash\n\r");
             continue;
-        }*/
+        }
 
         // Deactivate interruptions
         __disable_irq();
