@@ -32,9 +32,9 @@
 
 #include <sys/types.h>
 
-#include "crypto_hash_sha256.h"
-#include "common.h"
-#include "utils.h"
+#include "Crypto/crypto_hash_sha256.h"
+#include "Crypto/common.h"
+#include "Crypto/utils.h"
 
 static void
 be32enc_vect(unsigned char *dst, const uint32_t *src, size_t len)
