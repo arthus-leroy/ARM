@@ -46,10 +46,9 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-UART_HandleTypeDef huart1;
-USART_HandleTypeDef husart2;
-DMA_HandleTypeDef hdma_usart1_rx;
-DMA_HandleTypeDef hdma_usart1_tx;
+UART_HandleTypeDef huart2;
+DMA_HandleTypeDef hdma_usart2_tx;
+DMA_HandleTypeDef hdma_usart2_rx;
 
 /* USER CODE BEGIN PV */
 
@@ -59,21 +58,30 @@ DMA_HandleTypeDef hdma_usart1_tx;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
-static void MX_USART1_UART_Init(void);
-static void MX_USART2_Init(void);
+static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+enum TX_ERR
+{
+    NO_ERR,
+	ASSERT_ERR,
+    CORRUPT,
+	WRONG_HASH
+};
+
 int sending;
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
     sending = 0;
 }
 
-/// State of bootlader State Machine
+// LEN, OP, ERR, ARGS..., HASH
+unsigned char tx[1024];
+
 unsigned char dma1[DMA_BUFFER_SIZE];
 unsigned char dma2[DMA_BUFFER_SIZE];
 
@@ -115,7 +123,7 @@ void receive_dma_program(struct crypto_hash_sha256_state *hash,
 {
     dma_received = 0;
 
-    HAL_UART_Receive_DMA(&huart1, buff, buff_size);
+    HAL_UART_Receive_DMA(&huart2, buff, buff_size);
     process_dma_program(hash, prev, DMA_BUFFER_SIZE);
 
     while (dma_received == 0)
@@ -124,6 +132,30 @@ void receive_dma_program(struct crypto_hash_sha256_state *hash,
     // switch buffer
     prev = buff;
     buff = (buff == dma1 ? dma2 : dma1);
+}
+
+void send_error(const int err)
+{
+	tx[1] = 0;
+	tx[2] = err;
+	tx[3 + tx[0]] = 0;	// won't bother with checksum, not really important
+
+	HAL_UART_Transmit_DMA(&huart2, tx, 3 + tx[0] + 1);
+}
+
+void assert(const char *code, const char *file, const int line, const int err)
+{
+	if (err)
+	{
+		tx[0] = sprintf((char*) tx + 3, "assertion \"%s\" failed: file \"%s\", line %d", code, file, line);
+		tx[1] = 0;
+		tx[2] = ASSERT_ERR;
+		tx[3 + tx[0]] = 0;	// won't bother with checksum, not really important
+
+		HAL_UART_Transmit_DMA(&huart2, tx, 3 + tx[0] + 1);
+
+		while (1);
+	}
 }
 /* USER CODE END 0 */
 
@@ -156,8 +188,7 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DMA_Init();
-  MX_USART1_UART_Init();
-  MX_USART2_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
 
   /* USER CODE END 2 */
@@ -181,7 +212,7 @@ int main(void)
         // STEP 1: Get size of the program
         unsigned size;
         dma_received = 0;
-        HAL_UART_Receive_DMA(&huart1, (unsigned char*) &size, sizeof(unsigned));
+        HAL_UART_Receive_DMA(&huart2, (unsigned char*) &size, sizeof(unsigned));
         while (dma_received == 0)
         	;
 
@@ -198,13 +229,14 @@ int main(void)
         // STEP 3: Received encrypted hash
         dma_received = 0;
         unsigned char program_crypted_hash[crypto_hash_sha256_BYTES];
-        HAL_UART_Receive_DMA(&huart1, program_crypted_hash, crypto_hash_sha256_BYTES);
+        HAL_UART_Receive_DMA(&huart2, program_crypted_hash, crypto_hash_sha256_BYTES);
         while (dma_received == 0)
         	;
 
+        // STEP 4 : Receive integrity hash
         dma_received = 0;
         unsigned char program_hash[crypto_hash_sha256_BYTES];
-        HAL_UART_Receive_DMA(&huart1, program_hash, crypto_hash_sha256_BYTES);
+        HAL_UART_Receive_DMA(&huart2, program_hash, crypto_hash_sha256_BYTES);
         while (dma_received == 0)
         	;
 
@@ -215,7 +247,7 @@ int main(void)
         // compare hash
 /*        if (strncmp(sha256_hash, program_hash, crypto_hash_sha256_BYTES))
         {
-            printf("Corrupted message\n\r");
+            send_error(CORRUPT);
             continue;
         }*/
 
@@ -224,7 +256,7 @@ int main(void)
         if (crypto_sign_verify_detached(program_crypted_hash, program_hash,
         								crypto_hash_sha256_BYTES, public_key))
         {
-            printf("Invalid hash\n\r");
+            send_error(WRONG_HASH);
             continue;
         }
 
@@ -232,8 +264,7 @@ int main(void)
         __disable_irq();
 
         // Deinit peripherals (TODO: forgot any ?)
-        HAL_UART_DeInit(&huart1);
-        HAL_USART_DeInit(&husart2);
+        HAL_UART_DeInit(&huart2);
 
         // Set Interruption Table (VTOR)
         SCB->VTOR = PROGRAM_FLASH;
@@ -250,6 +281,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+        MX_USART2_UART_Init();
     }
   /* USER CODE END 3 */
 }
@@ -294,44 +326,11 @@ void SystemClock_Config(void)
 }
 
 /**
-  * @brief USART1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USART1_UART_Init(void)
-{
-
-  /* USER CODE BEGIN USART1_Init 0 */
-
-  /* USER CODE END USART1_Init 0 */
-
-  /* USER CODE BEGIN USART1_Init 1 */
-
-  /* USER CODE END USART1_Init 1 */
-  huart1.Instance = USART1;
-  huart1.Init.BaudRate = 115200;
-  huart1.Init.WordLength = UART_WORDLENGTH_8B;
-  huart1.Init.StopBits = UART_STOPBITS_1;
-  huart1.Init.Parity = UART_PARITY_NONE;
-  huart1.Init.Mode = UART_MODE_TX_RX;
-  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
-  if (HAL_UART_Init(&huart1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USART1_Init 2 */
-
-  /* USER CODE END USART1_Init 2 */
-
-}
-
-/**
   * @brief USART2 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_USART2_Init(void)
+static void MX_USART2_UART_Init(void)
 {
 
   /* USER CODE BEGIN USART2_Init 0 */
@@ -341,16 +340,15 @@ static void MX_USART2_Init(void)
   /* USER CODE BEGIN USART2_Init 1 */
 
   /* USER CODE END USART2_Init 1 */
-  husart2.Instance = USART2;
-  husart2.Init.BaudRate = 115200;
-  husart2.Init.WordLength = USART_WORDLENGTH_8B;
-  husart2.Init.StopBits = USART_STOPBITS_1;
-  husart2.Init.Parity = USART_PARITY_NONE;
-  husart2.Init.Mode = USART_MODE_TX_RX;
-  husart2.Init.CLKPolarity = USART_POLARITY_LOW;
-  husart2.Init.CLKPhase = USART_PHASE_1EDGE;
-  husart2.Init.CLKLastBit = USART_LASTBIT_DISABLE;
-  if (HAL_USART_Init(&husart2) != HAL_OK)
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
   {
     Error_Handler();
   }
@@ -367,15 +365,15 @@ static void MX_DMA_Init(void)
 {
 
   /* DMA controller clock enable */
-  __HAL_RCC_DMA2_CLK_ENABLE();
+  __HAL_RCC_DMA1_CLK_ENABLE();
 
   /* DMA interrupt init */
-  /* DMA2_Stream2_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Stream2_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(DMA2_Stream2_IRQn);
-  /* DMA2_Stream7_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Stream7_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(DMA2_Stream7_IRQn);
+  /* DMA1_Stream5_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream5_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream5_IRQn);
+  /* DMA1_Stream6_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream6_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream6_IRQn);
 
 }
 
