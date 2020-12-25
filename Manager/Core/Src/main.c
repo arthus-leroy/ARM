@@ -50,10 +50,9 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-UART_HandleTypeDef huart1;
-USART_HandleTypeDef husart2;
-DMA_HandleTypeDef hdma_usart1_tx;
-DMA_HandleTypeDef hdma_usart1_rx;
+UART_HandleTypeDef huart2;
+DMA_HandleTypeDef hdma_usart2_tx;
+DMA_HandleTypeDef hdma_usart2_rx;
 
 /* USER CODE BEGIN PV */
 
@@ -63,8 +62,7 @@ DMA_HandleTypeDef hdma_usart1_rx;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
-static void MX_USART1_UART_Init(void);
-static void MX_USART2_Init(void);
+static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -77,16 +75,18 @@ enum OP
     MOD_MAST_PWD,
     SEND_KEY,
     SIGN,
-    ADD_PWD,
-    GET_PWD,
-    DEL_PWD,
+    ADD_LOGIN,
+    GET_LOGIN,
+    DEL_LOGIN,
     QUIT,
 };
 
 enum TX_ERR
 {
     NO_ERR,
+	ASSERT_ERR,
     CORRUPT,
+	WRONG_HASH,			// unused, for compatibility
     WRONG_PWD,
     LOGIN_NOT_EXISTS
 };
@@ -96,12 +96,12 @@ unsigned char public_key[PUBLIC_KEY_SIZE];
 unsigned char private_key[PRIVATE_KEY_SIZE];
 unsigned long long sign_len;
 
-// FIXME: get the right pointer (a place or a way where ram won't be rewritten)
+// FIXME: get the right pointer (a place or a way where ram won't get rewritten)
 unsigned char *password_buffer = (unsigned char*) 0x20008000;
 
-// LEN, OP, ARGS..., HASH
-unsigned char tx[1024];
 // LEN, OP, ERR, ARGS..., HASH
+unsigned char tx[1024];
+// LEN, OP, ARGS..., HASH
 unsigned char rx[1024];
 
 /// Checksum
@@ -110,22 +110,12 @@ unsigned checksum;
 /// hash for SIGN operation
 unsigned char hash[HASH_SIZE];
 
-void assert(const char *code, const char *file, const unsigned line, const int res)
-{
-    if (res == 0)
-    {
-        printf("\rassertion \"%s\" failed: file \"%s\", line %d\n", code, file, line);
-        while (1);
-    }
-}
-
 int dma_sent;
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
-    dma_sent = 0;
+    dma_sent = 1;
 }
 
-/// State of bootlader State Machine
 unsigned char dma1[DMA_BUFFER_SIZE];
 unsigned char dma2[DMA_BUFFER_SIZE];
 
@@ -189,11 +179,26 @@ int check_rx_integrity(void)
 	unsigned char sum;
 
 	dma_received = 0;
-	HAL_UART_Receive_DMA(&huart1, &sum, sizeof(unsigned char));
+	HAL_UART_Receive_DMA(&huart2, &sum, sizeof(unsigned char));
 	while (dma_received == 0)
 		;
 
 	return sum == (unsigned char) checksum;
+}
+
+void assert(const char *code, const char *file, const unsigned line, const int res)
+{
+    if (res == 0)
+    {
+    	set_tx_header(ASSERT_ERR);
+        tx[0] = sprintf((char*) tx + 3, "assertion \"%s\" failed: file \"%s\", line %d", code, file, line);
+        set_tx_checksum();
+
+        HAL_UART_Transmit_DMA(&huart2, tx, 2 + tx[0] + 1);
+
+        while (1)
+        	;
+    }
 }
 
 /*========== LOGIN functions ==========*/
@@ -222,7 +227,7 @@ int find_login(const unsigned char *login)
     while (i < total_size)
     {
         const unsigned char login_size = *(password_buffer + i);
-        i+= sizeof(unsigned char);
+        i += sizeof(unsigned char);
         ASSERT(login_size != 0);
 
         const unsigned char pwd_size = *(password_buffer + i);
@@ -327,7 +332,7 @@ void receive_dma_frame(struct crypto_hash_sha256_state *hash,
 {
     dma_received = 0;
 
-    HAL_UART_Receive_DMA(&huart1, buff, buff_size);
+    HAL_UART_Receive_DMA(&huart2, buff, buff_size);
     process_dma_frame(hash, DMA_BUFFER_SIZE);
 
     while (dma_received == 0)
@@ -390,11 +395,11 @@ int process_request(const int op)
             tx[0] += sign_len;
             break;
 
-        case ADD_PWD:
+        case ADD_LOGIN:
             add_login(args);
             break;
 
-        case GET_PWD:
+        case GET_LOGIN:
             if ((i = find_login(args)) == -1)
             {
                 set_tx_error(LOGIN_NOT_EXISTS);
@@ -405,7 +410,7 @@ int process_request(const int op)
 						get_password_len(password_buffer + i));
             break;
 
-        case DEL_PWD:
+        case DEL_LOGIN:
             if (delete_login(args))
                 set_tx_error(LOGIN_NOT_EXISTS);
             break;
@@ -451,8 +456,7 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DMA_Init();
-  MX_USART1_UART_Init();
-  MX_USART2_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
     // generate key pair at the beginning
     crypto_sign_keypair(public_key, private_key);
@@ -466,7 +470,7 @@ int main(void)
 
     	// Step 1 : fetch header
         dma_received = 0;
-        HAL_UART_Receive_DMA(&huart1, rx, 2);    // receive LEN and OP
+        HAL_UART_Receive_DMA(&huart2, rx, 2);    // receive LEN and OP
         i += 2;
         while (dma_received == 0)
             ;
@@ -480,7 +484,7 @@ int main(void)
         if (use_password[op])
         {
         	dma_received = 0;
-        	HAL_UART_Receive_DMA(&huart1, rx + i, MASTER_PASSWORD_SIZE);
+        	HAL_UART_Receive_DMA(&huart2, rx + i, MASTER_PASSWORD_SIZE);
         	while (dma_received == 0)
         		;
 
@@ -512,7 +516,7 @@ int main(void)
         else
         {
         	dma_received = 0;
-        	HAL_UART_Receive_DMA(&huart1, rx + i, len);
+        	HAL_UART_Receive_DMA(&huart2, rx + i, len);
         	while (dma_received == 0)
         		;
         }
@@ -520,8 +524,12 @@ int main(void)
         if (process_request(op))
         {
             set_tx_checksum();
+
+            dma_sent = 0;
             // send header (2 bytes) + args + checksum (1 byte)
-            HAL_UART_Transmit_DMA(&huart1, tx, 2 + tx[0] + 1);
+            HAL_UART_Transmit_DMA(&huart2, tx, 2 + tx[0] + 1);
+            while (dma_sent == 0)
+            	;
         }
         else if (op == QUIT)
             return 0;
@@ -572,44 +580,11 @@ void SystemClock_Config(void)
 }
 
 /**
-  * @brief USART1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USART1_UART_Init(void)
-{
-
-  /* USER CODE BEGIN USART1_Init 0 */
-
-  /* USER CODE END USART1_Init 0 */
-
-  /* USER CODE BEGIN USART1_Init 1 */
-
-  /* USER CODE END USART1_Init 1 */
-  huart1.Instance = USART1;
-  huart1.Init.BaudRate = 115200;
-  huart1.Init.WordLength = UART_WORDLENGTH_8B;
-  huart1.Init.StopBits = UART_STOPBITS_1;
-  huart1.Init.Parity = UART_PARITY_NONE;
-  huart1.Init.Mode = UART_MODE_TX_RX;
-  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
-  if (HAL_UART_Init(&huart1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USART1_Init 2 */
-
-  /* USER CODE END USART1_Init 2 */
-
-}
-
-/**
   * @brief USART2 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_USART2_Init(void)
+static void MX_USART2_UART_Init(void)
 {
 
   /* USER CODE BEGIN USART2_Init 0 */
@@ -619,16 +594,15 @@ static void MX_USART2_Init(void)
   /* USER CODE BEGIN USART2_Init 1 */
 
   /* USER CODE END USART2_Init 1 */
-  husart2.Instance = USART2;
-  husart2.Init.BaudRate = 115200;
-  husart2.Init.WordLength = USART_WORDLENGTH_8B;
-  husart2.Init.StopBits = USART_STOPBITS_1;
-  husart2.Init.Parity = USART_PARITY_NONE;
-  husart2.Init.Mode = USART_MODE_TX_RX;
-  husart2.Init.CLKPolarity = USART_POLARITY_LOW;
-  husart2.Init.CLKPhase = USART_PHASE_1EDGE;
-  husart2.Init.CLKLastBit = USART_LASTBIT_DISABLE;
-  if (HAL_USART_Init(&husart2) != HAL_OK)
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
   {
     Error_Handler();
   }
@@ -645,15 +619,15 @@ static void MX_DMA_Init(void)
 {
 
   /* DMA controller clock enable */
-  __HAL_RCC_DMA2_CLK_ENABLE();
+  __HAL_RCC_DMA1_CLK_ENABLE();
 
   /* DMA interrupt init */
-  /* DMA2_Stream2_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Stream2_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(DMA2_Stream2_IRQn);
-  /* DMA2_Stream7_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Stream7_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(DMA2_Stream7_IRQn);
+  /* DMA1_Stream5_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream5_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream5_IRQn);
+  /* DMA1_Stream6_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream6_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream6_IRQn);
 
 }
 
