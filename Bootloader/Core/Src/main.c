@@ -22,6 +22,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+# include <string.h>
 # include <stdio.h>
 
 # include "Crypto/crypto_hash_sha256.h"
@@ -73,10 +74,10 @@ enum TX_ERR
 	WRONG_HASH
 };
 
-int sending;
+int dma_sent;
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
-    sending = 0;
+    dma_sent = 0;
 }
 
 // LEN, OP, ERR, ARGS..., HASH
@@ -134,13 +135,29 @@ void receive_dma_program(struct crypto_hash_sha256_state *hash,
     buff = (buff == dma1 ? dma2 : dma1);
 }
 
-void send_error(const int err)
+void send_dma(const int err, const char *str)
 {
+	if (str)
+	{
+		tx[0] = strlen(str);
+		strcpy((char*) tx + 3, str);
+	}
+	else
+		tx[0] = 0;
 	tx[1] = 0;
 	tx[2] = err;
 	tx[3 + tx[0]] = 0;	// won't bother with checksum, not really important
 
 	HAL_UART_Transmit_DMA(&huart2, tx, 3 + tx[0] + 1);
+
+}
+
+void send_error(const int err, const char *str)
+{
+	dma_sent = 0;
+	send_dma(err, str);
+	while (dma_sent == 0)
+		;
 }
 
 void assert(const char *code, const char *file, const int line, const int err)
@@ -199,15 +216,13 @@ int main(void)
     {
         HAL_FLASH_Unlock();
 
-        crypto_hash_sha256_state hash;
-        crypto_hash_sha256_init(&hash);
-
-        // Erase sector 7 (128 KB), should be enough
+    	// Erase sector 7 (128 KB), should be enough
 		FLASH_Erase_Sector(7, FLASH_VOLTAGE_RANGE_3);
-//		if ( != HAL_OK)
-//			printf("Couldn't erase flash\n\r", sector);
+//		ASSERT( != HAL_OK)
 		while (FLASH->SR & FLASH_SR_BSY)
 			;
+
+    	send_error(NO_ERR, "Can you hear me ?");
 
         // STEP 1: Get size of the program
         unsigned size;
@@ -216,7 +231,12 @@ int main(void)
         while (dma_received == 0)
         	;
 
+        send_dma(NO_ERR, "Size received");
+
         // STEP 2: Receive and write the program
+        crypto_hash_sha256_state hash;
+        crypto_hash_sha256_init(&hash);
+
         for (; size >= DMA_BUFFER_SIZE; size -= DMA_BUFFER_SIZE)
             receive_dma_program(&hash, DMA_BUFFER_SIZE);
 
@@ -226,12 +246,16 @@ int main(void)
         process_dma_program(&hash, prev, size);
         HAL_FLASH_Lock();
 
+        send_dma(NO_ERR, "Code received");
+
         // STEP 3: Received encrypted hash
         dma_received = 0;
         unsigned char program_crypted_hash[crypto_hash_sha256_BYTES];
         HAL_UART_Receive_DMA(&huart2, program_crypted_hash, crypto_hash_sha256_BYTES);
         while (dma_received == 0)
         	;
+
+        send_dma(NO_ERR, "Hash received");
 
         // STEP 4 : Receive integrity hash
         dma_received = 0;
@@ -240,10 +264,10 @@ int main(void)
         while (dma_received == 0)
         	;
 
-        // TODO: Check HASH
         unsigned char sha256_hash[crypto_hash_sha256_BYTES];
         crypto_hash_sha256_final(&hash, sha256_hash);
 
+        // TODO: Check HASH
         // compare hash
 /*        if (strncmp(sha256_hash, program_hash, crypto_hash_sha256_BYTES))
         {
@@ -256,7 +280,7 @@ int main(void)
         if (crypto_sign_verify_detached(program_crypted_hash, program_hash,
         								crypto_hash_sha256_BYTES, public_key))
         {
-            send_error(WRONG_HASH);
+            send_error(WRONG_HASH, NULL);
             continue;
         }
 
@@ -270,14 +294,13 @@ int main(void)
         SCB->VTOR = PROGRAM_FLASH;
 
         void (*program)(void);
-        program = (void (*)(void)) PROGRAM_FLASH;
+        program = (void (*)(void)) PROGRAM_FLASH + 4;
 
         // Set stack pointer
         __set_MSP(0);
 
         // Jump on the program
         program();
-
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
