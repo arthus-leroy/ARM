@@ -1,6 +1,6 @@
 #!/bin/python
 
-from tkinter import Tk, StringVar, NW, W, E
+from tkinter import Tk, StringVar, W, E
 from tkinter.ttk import Notebook, Frame, Style, Label, Button, Entry
 from tkinter.filedialog import askopenfilename
 from tkinter.messagebox import showerror, showinfo
@@ -39,16 +39,42 @@ ser = Serial(com, baud)
 root = Tk()
 root.title("UI")
 
+def read_serial(stop, skip):
+	print("header = ", end = '')
+	while ser.in_waiting < 3:
+		if skip():
+			return None, None
+
+	header = ser.read(3)
+	print("".join("%02X" %a for a in header))
+
+	print("args = ", end = '')
+	while ser.in_waiting < header[0]:
+		if skip():
+			return None, None
+
+	args = ser.read(header[0])
+	print("".join("%02X" %a for a in args))
+
+	return header, args
+
 answer_area = StringVar(root)
-def read_serial():
+def process_serial(stop, skip):
 	while True:
-		header = ser.read(3)
-		args = ser.read(header[0])
-		ser.read(1)		# checksum (ignored)
+		ser.read(ser.in_waiting)
+		print("serial")
+
+		while ser.in_waiting == 0:
+			if stop():
+				return
+
+		header, args = read_serial(stop, skip)
+		if header == None:
+			continue
 
 		err = header[2]
 		if err == ASSERT_ERR:
-			showerror("Assertion Error", "".join(chr(a) for a in args))
+			showerror("Assertion Error", args.decode())
 		elif err == CORRUPT:
 			showerror("Corrution error", "Sent message was corrupted. Try again.")
 		elif err == WRONG_HASH:
@@ -60,28 +86,31 @@ def read_serial():
 		else:
 			op = header[1]
 			if op == MOD_MAST_PWD:
-				showinfo("Master password changed")
+				showinfo("Info", "Master password changed")
 				master_password.set(master_password_mod.get())
 			elif op == SEND_KEY \
 			  or op == SIGN:
 				answer_area.set("".join("%0X" %a for a in args))
 			elif op == ADD_LOGIN:
-				showinfo("Added password")
+				showinfo("Info", "Added password")
 			elif op == DEL_LOGIN:
-				showinfo("Deleted password")
+				showinfo("Info", "Deleted password")
 			elif op == GET_LOGIN:
-				answer_area.set("".join(chr(a) for a in args))
+				answer_area.set(args.decode())
 			elif op == QUIT:
-				showinfo("Returned to bootloader")
+				showinfo("Info", "Returned to bootloader")
+			else:
+				answer_area.set(args.decode())
 
 bootloader_path = StringVar(root)
 def send_bootloader():
 	with open(bootloader_path.get(), "rb") as f:
-		data = f.read().split()
-		h = sha256(data, encoder = HexEncoder)
-		ch = private_key.sign(h)
+		data = f.read()
+		h = HexEncoder.encode(sha256(data))
+		ch = HexEncoder.encode(private_key.sign(h, HexEncoder).signature)
 
-		ser.write([len(data)] + data + ch + h)
+		message = len(data).to_bytes(4, "big") + data + ch + h
+		print("write :", ser.write(message), "on", len(message), "(4, %s, %s, %s)" %(len(data), len(ch), len(h)))
 
 master_password = StringVar(root)
 def send_tx_message(password, op, args):
@@ -90,43 +119,53 @@ def send_tx_message(password, op, args):
 		checksum += a
 
 	if password:
-		master_pass = [ord(c) for c in master_password.get()]
-		ser.write([len(args), op] + master_pass + args + [checksum & 0xFF])
+		master_pass = master_password.get().encode()
+		ser.write(len(args).to_bytes(1) + op.to_bytes(1) \
+			    + master_pass + args + checksum.to_bytes(1))
 	else:
-		ser.write([len(args), op] + args + [checksum & 0xFF])
+		ser.write(len(args).to_bytes(1) + op.to_bytes(1) \
+				+ args + checksum.to_bytes(1))
 
 master_password_mod = StringVar(root)
 def modify_master_password():
-	master_pass_mod = [ord(c) for c in master_password_mod.get()]
-	send_tx_message(1, MOD_MAST_PWD, master_pass_mod)
+	send_tx_message(1, MOD_MAST_PWD, master_password_mod.get().encode())
 
 def send_key():
-	send_tx_message(1, SEND_KEY, [])
+	send_tx_message(1, SEND_KEY, b'')
 
 sign_file_path = StringVar(root)
 def sign_file():
-	sign_file_p = [ord(c) for c in sign_file_path.get()]
-	send_tx_message(1, SIGN, sign_file_p)
+	send_tx_message(1, SIGN, sign_file_path.get().encode())
 
 login = StringVar(root)
 password = StringVar(root)
 def add_login():
-	login_pwd = [ord(c) for c in login.get()] + [0] \
-			  + [ord(c) for c in password.get()] + [0]
+	login_pwd = login.get().encode() + b'\x00' \
+			  + password.get().encode() + b'\x00'
 	send_tx_message(1, ADD_LOGIN, login_pwd)
 
 def get_login():
-	login_tab = [ord(c) for c in login.get()] + [0]
+	login_tab = login.get().encode() + b'\x00'
 	send_tx_message(1, GET_LOGIN, login_tab)
 
 def del_login():
-	login_tab = [ord(c) for c in login.get()] + [0]
+	login_tab = login.get().encode() + b'\x00'
 	send_tx_message(1, DEL_LOGIN, login_tab)
 
 def quit():
-	send_tx_message(0, QUIT, [])
+	send_tx_message(0, QUIT, b'')
 
-Thread(target = read_serial, args = ())
+def thread_stop():
+	b = getattr(thread_stop, "bool")
+	if b:
+		setattr(thread_stop, "bool", False)
+
+	return b
+
+thread_kill = False
+setattr(thread_stop, "bool", False)
+thread = Thread(target = process_serial, args = (lambda: thread_kill, thread_stop))
+thread.start()
 
 style = Style()
 for item in ("TFrame", "TButton", "TLabel"):
@@ -140,6 +179,10 @@ Label(bootloader, textvariable = bootloader_path, relief = "groove").grid(row = 
 Button(bootloader, text = "...", command = lambda: bootloader_path.set(askopenfilename(filetypes = [("Binary files", "*.bin")]))).grid(row = 1, column = 2)
 Label(bootloader, text = "").grid(row = 2)
 Button(bootloader, text = "Send bootloader code", command = send_bootloader).grid(row = 3, sticky = W)
+Label(bootloader).grid(row = 4)
+Label(bootloader, textvariable = answer_area, relief = "groove").grid(row = 5, columnspan = 3, sticky = W+E)
+Label(bootloader, text = "").grid(row = 6)
+Button(bootloader, text = "Flush input buffer", command = lambda: setattr(thread_stop, "bool", True)).grid(row = 7, sticky = W+E)
 frame.add(bootloader, text = "Bootloader")
 
 manager = Frame(frame)
@@ -174,7 +217,9 @@ Button(manager, text = "Del", command = del_login).grid(row = 12, column = 2)
 
 Label(manager, text = "").grid(row = 13)
 
-Button(manager, text = "Quit", command = quit).grid(row = 14, columnspan = 3, sticky = W+E)
+Label(manager, textvariable = answer_area, relief = "groove").grid(row = 14, columnspan = 3, sticky = W+E)
+
+Button(manager, text = "Quit", command = quit).grid(row = 15, columnspan = 3, sticky = W+E)
 
 bootloader.columnconfigure(0, weight = 1)
 bootloader.columnconfigure(1, weight = 1)
@@ -185,6 +230,10 @@ manager.columnconfigure(2, weight = 1)
 
 frame.add(manager, text = "Manager")
 
-frame.pack(anchor = NW, expand = 1, fill = "both")
+frame.pack(expand = 1, fill = "both")
 
 root.mainloop()
+
+thread_kill = True
+thread._stop()
+thread.join()
