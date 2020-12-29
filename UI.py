@@ -39,8 +39,8 @@ ser = Serial(com, baud)
 root = Tk()
 root.title("UI")
 
-def read_serial(stop, skip):
-	print("header = ", end = '')
+def read_serial(skip):
+	print("header = ", end = '', flush = True)
 	while ser.in_waiting < 3:
 		if skip():
 			return None, None
@@ -48,7 +48,7 @@ def read_serial(stop, skip):
 	header = ser.read(3)
 	print("".join("%02X" %a for a in header))
 
-	print("args = ", end = '')
+	print("args = ", end = '', flush = True)
 	while ser.in_waiting < header[0]:
 		if skip():
 			return None, None
@@ -59,16 +59,12 @@ def read_serial(stop, skip):
 	return header, args
 
 answer_area = StringVar(root)
-def process_serial(stop, skip):
+def process_serial(skip):
 	while True:
 		ser.read(ser.in_waiting)
 		print("serial")
 
-		while ser.in_waiting == 0:
-			if stop():
-				return
-
-		header, args = read_serial(stop, skip)
+		header, args = read_serial(skip)
 		if header == None:
 			continue
 
@@ -109,8 +105,7 @@ def send_bootloader():
 		h = HexEncoder.encode(sha256(data))
 		ch = HexEncoder.encode(private_key.sign(h, HexEncoder).signature)
 
-		message = len(data).to_bytes(4, "big") + data + ch + h
-		print("write :", ser.write(message), "on", len(message), "(4, %s, %s, %s)" %(len(data), len(ch), len(h)))
+		ser.write(len(data).to_bytes(4, "big") + data + ch + h)
 
 master_password = StringVar(root)
 def send_tx_message(password, op, args):
@@ -162,10 +157,8 @@ def thread_stop():
 
 	return b
 
-thread_kill = False
 setattr(thread_stop, "bool", False)
-thread = Thread(target = process_serial, args = (lambda: thread_kill, thread_stop))
-thread.start()
+Thread(target = process_serial, args = (thread_stop,), daemon = True).start()
 
 style = Style()
 for item in ("TFrame", "TButton", "TLabel"):
@@ -227,13 +220,8 @@ bootloader.columnconfigure(1, weight = 1)
 manager.columnconfigure(0, weight = 1)
 manager.columnconfigure(1, weight = 1)
 manager.columnconfigure(2, weight = 1)
-
 frame.add(manager, text = "Manager")
 
 frame.pack(expand = 1, fill = "both")
 
 root.mainloop()
-
-thread_kill = True
-thread._stop()
-thread.join()
