@@ -61,7 +61,7 @@ def read_serial(skip):
 answer_area = StringVar(root)
 def process_serial(skip):
 	while True:
-		ser.read(ser.in_waiting)
+		ser.reset_input_buffer()
 		print("serial")
 
 		header, args = read_serial(skip)
@@ -115,11 +115,11 @@ def send_tx_message(password, op, args):
 
 	if password:
 		master_pass = master_password.get().encode()
-		ser.write(len(args).to_bytes(1) + op.to_bytes(1) \
-			    + master_pass + args + checksum.to_bytes(1))
+		ser.write(len(args).to_bytes(1, "big") + op.to_bytes(1, "big") \
+			    + master_pass + args + checksum.to_bytes(1, "big"))
 	else:
-		ser.write(len(args).to_bytes(1) + op.to_bytes(1) \
-				+ args + checksum.to_bytes(1))
+		ser.write(len(args).to_bytes(1, "big") + op.to_bytes(1, "big") \
+				+ args + checksum.to_bytes(1, "big"))
 
 master_password_mod = StringVar(root)
 def modify_master_password():
