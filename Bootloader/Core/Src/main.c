@@ -40,6 +40,7 @@
 # define BASE_FLASH			0x8000000
 # define PROGRAM_FLASH		0x8060000
 # define SECTOR_SIZE		0x2000
+# define PUBLIC_KEY			""
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -70,15 +71,18 @@ enum TX_ERR
 {
     NO_ERR,
 	ASSERT_ERR,
+	DMA_LATE,
     CORRUPT,
 	WRONG_HASH
 };
 
-int dma_sent;
+int dma_sent = 0;
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
-    dma_sent = 0;
+    dma_sent = 1;
 }
+
+
 
 // LEN, OP, ERR, ARGS..., HASH
 unsigned char tx[1024];
@@ -101,6 +105,41 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     dma_received = 1;
 }
 
+void send_number(const int err, int i)
+{
+	tx[0] = sprintf((char*) tx + 3, "%d", i);
+	tx[1] = 0;
+	tx[2] = err;
+	tx[3 + tx[0]] = 0;	// won't bother with checksum, not really important
+
+	HAL_UART_Transmit_DMA(&huart2, tx, 3 + tx[0] + 1);
+}
+
+void send_dma(const int err, const char *str)
+{
+	if (str)
+	{
+		tx[0] = strlen(str);
+		strcpy((char*) tx + 3, str);
+	}
+	else
+		tx[0] = 0;
+
+	tx[1] = 0;
+	tx[2] = err;
+	tx[3 + tx[0]] = 0;	// won't bother with checksum, not really important
+
+	HAL_UART_Transmit_DMA(&huart2, tx, 3 + tx[0] + 1);
+}
+
+void send_error(const int err, const char *str)
+{
+	dma_sent = 0;
+	send_dma(err, str);
+	while (dma_sent == 0)
+		;
+}
+
 void process_dma_program(struct crypto_hash_sha256_state *hash,
 						 unsigned char *buff,
                          int size)
@@ -116,6 +155,7 @@ void process_dma_program(struct crypto_hash_sha256_state *hash,
                               ((unsigned*) prev)[i]);
 
         program_flash += size;
+//        send_number(NO_ERR, program_flash - PROGRAM_FLASH);
     }
 }
 
@@ -124,40 +164,21 @@ void receive_dma_program(struct crypto_hash_sha256_state *hash,
 {
     dma_received = 0;
 
+	HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
+
     HAL_UART_Receive_DMA(&huart2, buff, buff_size);
     process_dma_program(hash, prev, DMA_BUFFER_SIZE);
 
+    int dma_late = 1;
     while (dma_received == 0)
-    	;
+        dma_late = 0;
+
+    if (dma_late)
+        send_error(DMA_LATE, NULL);
 
     // switch buffer
     prev = buff;
     buff = (buff == dma1 ? dma2 : dma1);
-}
-
-void send_dma(const int err, const char *str)
-{
-	if (str)
-	{
-		tx[0] = strlen(str);
-		strcpy((char*) tx + 3, str);
-	}
-	else
-		tx[0] = 0;
-	tx[1] = 0;
-	tx[2] = err;
-	tx[3 + tx[0]] = 0;	// won't bother with checksum, not really important
-
-	HAL_UART_Transmit_DMA(&huart2, tx, 3 + tx[0] + 1);
-
-}
-
-void send_error(const int err, const char *str)
-{
-	dma_sent = 0;
-	send_dma(err, str);
-	while (dma_sent == 0)
-		;
 }
 
 void assert(const char *code, const char *file, const int line, const int err)
@@ -171,7 +192,8 @@ void assert(const char *code, const char *file, const int line, const int err)
 
 		HAL_UART_Transmit_DMA(&huart2, tx, 3 + tx[0] + 1);
 
-		while (1);
+		while (1)
+			;
 	}
 }
 /* USER CODE END 0 */
@@ -207,7 +229,7 @@ int main(void)
   MX_DMA_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-
+  memcpy(public_key, PUBLIC_KEY, crypto_sign_PUBLICKEYBYTES);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -216,13 +238,16 @@ int main(void)
     {
         HAL_FLASH_Unlock();
 
-    	// Erase sector 7 (128 KB), should be enough
+        // FLASH size : 16 (0), 16, 16, 16, 64, 128, 128, 128 (7)
+
+        // Erase sector 6 and 7 (256 KB), should be enough
+		FLASH_Erase_Sector(6, FLASH_VOLTAGE_RANGE_3);
 		FLASH_Erase_Sector(7, FLASH_VOLTAGE_RANGE_3);
 //		ASSERT( != HAL_OK)
 		while (FLASH->SR & FLASH_SR_BSY)
 			;
 
-    	send_error(NO_ERR, "Can you hear me ?");
+		send_dma(NO_ERR, "Begin");
 
         // STEP 1: Get size of the program
         unsigned size;
@@ -231,20 +256,22 @@ int main(void)
         while (dma_received == 0)
         	;
 
-        send_dma(NO_ERR, "Size received");
-
         // STEP 2: Receive and write the program
         crypto_hash_sha256_state hash;
         crypto_hash_sha256_init(&hash);
 
-        for (; size >= DMA_BUFFER_SIZE; size -= DMA_BUFFER_SIZE)
+        for (; size > DMA_BUFFER_SIZE; size -= DMA_BUFFER_SIZE)
             receive_dma_program(&hash, DMA_BUFFER_SIZE);
 
         // receive last dma
         receive_dma_program(&hash, size);
+        send_dma(NO_ERR, "Code got");
+
         // process last dma
         process_dma_program(&hash, prev, size);
         HAL_FLASH_Lock();
+
+        HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
 
         send_dma(NO_ERR, "Code received");
 
@@ -407,9 +434,20 @@ static void MX_DMA_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOA_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : LED_Pin */
+  GPIO_InitStruct.Pin = LED_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(LED_GPIO_Port, &GPIO_InitStruct);
 
 }
 
