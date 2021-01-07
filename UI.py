@@ -15,10 +15,11 @@ from sys import argv
 
 NO_ERR				= 0
 ASSERT_ERR			= 1
-CORRUPT				= 2
-WRONG_HASH			= 3
-WRONG_PWD			= 4
-LOGIN_NOT_EXISTS	= 5
+DMA_LATE			= 2
+CORRUPT				= 3
+WRONG_HASH			= 4
+WRONG_PWD			= 5
+LOGIN_NOT_EXISTS	= 6
 
 MOD_MAST_PWD		= 1
 SEND_KEY			= 2
@@ -39,22 +40,22 @@ ser = Serial(com, baud)
 root = Tk()
 root.title("UI")
 
+def itob(num, size):
+	return num.to_bytes(size, "little")
+
 def read_serial(skip):
-	print("header = ", end = '', flush = True)
 	while ser.in_waiting < 3:
 		if skip():
 			return None, None
 
 	header = ser.read(3)
-	print("".join("%02X" %a for a in header))
 
-	print("args = ", end = '', flush = True)
+	print("(%s)" %header[0], end = ' ', flush = True)
 	while ser.in_waiting < header[0]:
 		if skip():
 			return None, None
 
 	args = ser.read(header[0])
-	print("".join("%02X" %a for a in args))
 
 	return header, args
 
@@ -62,7 +63,7 @@ answer_area = StringVar(root)
 def process_serial(skip):
 	while True:
 		ser.reset_input_buffer()
-		print("serial")
+		print("serial ", end = "", flush = True)
 
 		header, args = read_serial(skip)
 		if header == None:
@@ -71,6 +72,8 @@ def process_serial(skip):
 		err = header[2]
 		if err == ASSERT_ERR:
 			showerror("Assertion Error", args.decode())
+		elif err == DMA_LATE:
+			showerror("DMA error", "The DMA reception was hindered. Try again.")
 		elif err == CORRUPT:
 			showerror("Corrution error", "Sent message was corrupted. Try again.")
 		elif err == WRONG_HASH:
@@ -86,7 +89,7 @@ def process_serial(skip):
 				master_password.set(master_password_mod.get())
 			elif op == SEND_KEY \
 			  or op == SIGN:
-				answer_area.set("".join("%0X" %a for a in args))
+				answer_area.set("".join("%02X" %a for a in args))
 			elif op == ADD_LOGIN:
 				showinfo("Info", "Added password")
 			elif op == DEL_LOGIN:
@@ -96,7 +99,9 @@ def process_serial(skip):
 			elif op == QUIT:
 				showinfo("Info", "Returned to bootloader")
 			else:
-				answer_area.set(args.decode())
+				print(args.decode())
+
+		print("")
 
 bootloader_path = StringVar(root)
 def send_bootloader():
@@ -105,7 +110,7 @@ def send_bootloader():
 		h = HexEncoder.encode(sha256(data))
 		ch = HexEncoder.encode(private_key.sign(h, HexEncoder).signature)
 
-		ser.write(len(data).to_bytes(4, "big") + data + ch + h)
+		ser.write(itob(len(data), 4) + data + ch + h)
 
 master_password = StringVar(root)
 def send_tx_message(password, op, args):
@@ -115,11 +120,11 @@ def send_tx_message(password, op, args):
 
 	if password:
 		master_pass = master_password.get().encode()
-		ser.write(len(args).to_bytes(1, "big") + op.to_bytes(1, "big") \
-			    + master_pass + args + checksum.to_bytes(1, "big"))
+		ser.write(itob(len(args), 1) + itob(op, 1) \
+			    + master_pass + args + itob(checksum, 1))
 	else:
-		ser.write(len(args).to_bytes(1, "big") + op.to_bytes(1, "big") \
-				+ args + checksum.to_bytes(1, "big"))
+		ser.write(itob(len(args), 1) + itob(op, 1) \
+				+ args + itob(checksum, 1))
 
 master_password_mod = StringVar(root)
 def modify_master_password():
