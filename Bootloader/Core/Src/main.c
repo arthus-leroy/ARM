@@ -38,7 +38,7 @@
 /* USER CODE BEGIN PD */
 # define DMA_BUFFER_SIZE	0x1000
 # define BASE_FLASH			0x8000000
-# define PROGRAM_FLASH		0x8060000
+# define PROGRAM_FLASH		0x8040000	// sector 6 and 7
 # define SECTOR_SIZE		0x2000
 # define PUBLIC_KEY			""
 /* USER CODE END PD */
@@ -81,8 +81,6 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
     dma_sent = 1;
 }
-
-
 
 // LEN, OP, ERR, ARGS..., HASH
 unsigned char tx[1024];
@@ -140,7 +138,7 @@ void send_error(const int err, const char *str)
 		;
 }
 
-void process_dma_program(struct crypto_hash_sha256_state *hash,
+int process_dma_program(struct crypto_hash_sha256_state *hash,
 						 unsigned char *buff,
                          int size)
 {
@@ -150,35 +148,50 @@ void process_dma_program(struct crypto_hash_sha256_state *hash,
     					 + (size % sizeof(unsigned) != 0);
         crypto_hash_sha256_update(hash, buff, size);
         for (int i = 0; i < s; i++)
-            HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD,
+            if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD,
                               program_flash + i * sizeof(unsigned),
-                              ((unsigned*) prev)[i]);
+                              ((unsigned*) prev)[i]) != HAL_OK)
+            {
+                send_dma(ASSERT_ERR, "Couldn't write in Flash");
+                return 1;
+            }
 
         program_flash += size;
-//        send_number(NO_ERR, program_flash - PROGRAM_FLASH);
     }
+
+    return 0;
 }
 
-void receive_dma_program(struct crypto_hash_sha256_state *hash,
+int receive_dma_program(struct crypto_hash_sha256_state *hash,
                          const int buff_size)
 {
     dma_received = 0;
 
-	HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
+    if (HAL_UART_Receive_DMA(&huart2, buff, buff_size) != HAL_OK)
+    {
+        send_dma(ASSERT_ERR, "Failed to receive DMA");
+        return 1;
+    }
 
-    HAL_UART_Receive_DMA(&huart2, buff, buff_size);
-    process_dma_program(hash, prev, DMA_BUFFER_SIZE);
+    if (process_dma_program(hash, prev, DMA_BUFFER_SIZE))
+        return 1;
 
-    int dma_late = 1;
-    while (dma_received == 0)
-        dma_late = 0;
-
-    if (dma_late)
-        send_error(DMA_LATE, NULL);
+    HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
 
     // switch buffer
     prev = buff;
     buff = (buff == dma1 ? dma2 : dma1);
+
+    if (dma_received == 1 && buff_size == DMA_BUFFER_SIZE)
+    {
+        send_dma(DMA_LATE, NULL);
+        return 1;
+    }
+
+    while (dma_received == 0)
+        ;
+
+    return 0;
 }
 
 void assert(const char *code, const char *file, const int line, const int err)
@@ -260,20 +273,22 @@ int main(void)
         crypto_hash_sha256_state hash;
         crypto_hash_sha256_init(&hash);
 
+        int failed = 0;
         for (; size > DMA_BUFFER_SIZE; size -= DMA_BUFFER_SIZE)
-            receive_dma_program(&hash, DMA_BUFFER_SIZE);
+            if (receive_dma_program(&hash, DMA_BUFFER_SIZE))
+            {
+                failed = 1;
+                break;
+            }
+
+        if (failed)
+            continue;
 
         // receive last dma
-        receive_dma_program(&hash, size);
-        send_dma(NO_ERR, "Code got");
-
-        // process last dma
-        process_dma_program(&hash, prev, size);
-        HAL_FLASH_Lock();
+        if (receive_dma_program(&hash, size))
+            continue;
 
         HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
-
-        send_dma(NO_ERR, "Code received");
 
         // STEP 3: Received encrypted hash
         dma_received = 0;
@@ -282,14 +297,16 @@ int main(void)
         while (dma_received == 0)
         	;
 
-        send_dma(NO_ERR, "Hash received");
-
         // STEP 4 : Receive integrity hash
         dma_received = 0;
         unsigned char program_hash[crypto_hash_sha256_BYTES];
         HAL_UART_Receive_DMA(&huart2, program_hash, crypto_hash_sha256_BYTES);
         while (dma_received == 0)
         	;
+
+        // process last dma (delayed process to not hinder the DMA)
+        process_dma_program(&hash, prev, size);
+        HAL_FLASH_Lock();
 
         unsigned char sha256_hash[crypto_hash_sha256_BYTES];
         crypto_hash_sha256_final(&hash, sha256_hash);
