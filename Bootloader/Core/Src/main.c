@@ -24,6 +24,7 @@
 /* USER CODE BEGIN Includes */
 # include <string.h>
 # include <stdio.h>
+# include <stdarg.h>
 
 # include "Crypto/crypto_hash_sha256.h"
 # include "Crypto/crypto_sign.h"
@@ -40,7 +41,6 @@
 # define BASE_FLASH			0x8000000
 # define PROGRAM_FLASH		0x8040000	// sector 6 and 7
 # define SECTOR_SIZE		0x2000
-# define PUBLIC_KEY			""
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -73,7 +73,7 @@ enum TX_ERR
 	ASSERT_ERR,
 	DMA_LATE,
     CORRUPT,
-	WRONG_HASH
+	WRONG_SIGN
 };
 
 int dma_sent = 0;
@@ -93,8 +93,6 @@ unsigned char *buff = dma2;
 /// Previous dma buffer (received)
 unsigned char *prev = NULL;
 
-unsigned char public_key[crypto_sign_PUBLICKEYBYTES];
-
 unsigned program_flash = PROGRAM_FLASH;
 
 int dma_received = 0;
@@ -103,22 +101,14 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     dma_received = 1;
 }
 
-void send_number(const int err, int i)
+void send_dma(const int err, const char *format, ...)
 {
-	tx[0] = sprintf((char*) tx + 3, "%d", i);
-	tx[1] = 0;
-	tx[2] = err;
-	tx[3 + tx[0]] = 0;	// won't bother with checksum, not really important
-
-	HAL_UART_Transmit_DMA(&huart2, tx, 3 + tx[0] + 1);
-}
-
-void send_dma(const int err, const char *str)
-{
-	if (str)
+	if (format)
 	{
-		tx[0] = strlen(str);
-		strcpy((char*) tx + 3, str);
+		va_list va;
+		va_start(va, format);
+		tx[0] = vsnprintf((char*) tx + 3, 1000, format, va);
+		va_end(va);
 	}
 	else
 		tx[0] = 0;
@@ -130,10 +120,26 @@ void send_dma(const int err, const char *str)
 	HAL_UART_Transmit_DMA(&huart2, tx, 3 + tx[0] + 1);
 }
 
-void send_error(const int err, const char *str)
+void send_dma_blocking(const int err, const char *format, ...)
 {
+	if (format)
+	{
+		va_list va;
+		va_start(va, format);
+		tx[0] = vsnprintf((char*) tx + 3, 1000, format, va);
+		va_end(va);
+	}
+	else
+		tx[0] = 0;
+
 	dma_sent = 0;
-	send_dma(err, str);
+
+	tx[1] = 0;
+	tx[2] = err;
+	tx[3 + tx[0]] = 0;	// won't bother with checksum, not really important
+
+	HAL_UART_Transmit_DMA(&huart2, tx, 3 + tx[0] + 1);
+
 	while (dma_sent == 0)
 		;
 }
@@ -163,7 +169,7 @@ int process_dma_program(struct crypto_hash_sha256_state *hash,
 }
 
 int receive_dma_program(struct crypto_hash_sha256_state *hash,
-                         const int buff_size)
+                         const int buff_size, const int process)
 {
     dma_received = 0;
 
@@ -173,8 +179,9 @@ int receive_dma_program(struct crypto_hash_sha256_state *hash,
         return 1;
     }
 
-    if (process_dma_program(hash, prev, DMA_BUFFER_SIZE))
-        return 1;
+    if (process)
+    	if (process_dma_program(hash, prev, DMA_BUFFER_SIZE))
+    		return 1;
 
     HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
 
@@ -182,7 +189,8 @@ int receive_dma_program(struct crypto_hash_sha256_state *hash,
     prev = buff;
     buff = (buff == dma1 ? dma2 : dma1);
 
-    if (dma_received == 1 && buff_size == DMA_BUFFER_SIZE)
+    // DMA finished while we were processing and it's a middle of message
+    if (dma_received == 1)
     {
         send_dma(DMA_LATE, NULL);
         return 1;
@@ -242,7 +250,6 @@ int main(void)
   MX_DMA_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-  memcpy(public_key, PUBLIC_KEY, crypto_sign_PUBLICKEYBYTES);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -260,7 +267,10 @@ int main(void)
 		while (FLASH->SR & FLASH_SR_BSY)
 			;
 
-		send_dma(NO_ERR, "Begin");
+        crypto_hash_sha256_state hash;
+        crypto_hash_sha256_init(&hash);
+
+//		send_dma_blocking(NO_ERR, "Begin");
 
         // STEP 1: Get size of the program
         unsigned size;
@@ -270,12 +280,9 @@ int main(void)
         	;
 
         // STEP 2: Receive and write the program
-        crypto_hash_sha256_state hash;
-        crypto_hash_sha256_init(&hash);
-
         int failed = 0;
         for (; size > DMA_BUFFER_SIZE; size -= DMA_BUFFER_SIZE)
-            if (receive_dma_program(&hash, DMA_BUFFER_SIZE))
+            if (receive_dma_program(&hash, DMA_BUFFER_SIZE, 1))
             {
                 failed = 1;
                 break;
@@ -284,55 +291,73 @@ int main(void)
         if (failed)
             continue;
 
-        // receive last dma
-        if (receive_dma_program(&hash, size))
+        // receive last dma, but don't process anything
+        if (receive_dma_program(&hash, size, 0))
             continue;
 
         HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
 
         // STEP 3: Received encrypted hash
         dma_received = 0;
-        unsigned char program_crypted_hash[crypto_hash_sha256_BYTES];
-        HAL_UART_Receive_DMA(&huart2, program_crypted_hash, crypto_hash_sha256_BYTES);
+        unsigned char program_crypted_hash[crypto_sign_BYTES];
+        HAL_UART_Receive_DMA(&huart2, program_crypted_hash, crypto_sign_BYTES);
         while (dma_received == 0)
         	;
 
-        // STEP 4 : Receive integrity hash
+        // STEP 4 : Receive verify key (signature's public key)
+        dma_received = 0;
+        unsigned char public_key[crypto_sign_PUBLICKEYBYTES];
+        HAL_UART_Receive_DMA(&huart2, public_key, crypto_sign_PUBLICKEYBYTES);
+        while (dma_received == 0)
+        	;
+
+        // STEP 5 : Receive integrity hash
         dma_received = 0;
         unsigned char program_hash[crypto_hash_sha256_BYTES];
         HAL_UART_Receive_DMA(&huart2, program_hash, crypto_hash_sha256_BYTES);
         while (dma_received == 0)
         	;
 
-        // process last dma (delayed process to not hinder the DMA)
+        // process 2 last dmas (delayed process to not hinder the reception)
+        process_dma_program(&hash, buff, DMA_BUFFER_SIZE);
         process_dma_program(&hash, prev, size);
         HAL_FLASH_Lock();
 
         unsigned char sha256_hash[crypto_hash_sha256_BYTES];
         crypto_hash_sha256_final(&hash, sha256_hash);
 
-        // TODO: Check HASH
-        // compare hash
-/*        if (strncmp(sha256_hash, program_hash, crypto_hash_sha256_BYTES))
+        // compare integrity hash
+        if (memcmp(sha256_hash, program_hash, crypto_hash_sha256_BYTES))
         {
-            send_error(CORRUPT);
+            send_dma_blocking(CORRUPT, NULL);
             continue;
-        }*/
+        }
 
         // TODO: Check encrypted HASH
         // decrypt program_crypted_hash with public key
         if (crypto_sign_verify_detached(program_crypted_hash, program_hash,
-        								crypto_hash_sha256_BYTES, public_key))
+        								crypto_sign_PUBLICKEYBYTES, public_key))
         {
-            send_error(WRONG_HASH, NULL);
+            send_dma_blocking(WRONG_SIGN, NULL);
             continue;
         }
+
+//        send_dma_blocking(NO_ERR, "TEST PASSED !");
 
         // Deactivate interruptions
         __disable_irq();
 
         // Deinit peripherals (TODO: forgot any ?)
         HAL_UART_DeInit(&huart2);
+        HAL_GPIO_DeInit(LED_GPIO_Port, LED_Pin);
+        __HAL_RCC_DMA1_CLK_DISABLE();
+        __HAL_RCC_GPIOA_CLK_DISABLE();
+
+        HAL_RCC_DeInit();
+        HAL_DeInit();
+        SysTick->CTRL = 0;
+        SysTick->LOAD = 0;
+        SysTick->VAL = 0;
 
         // Set Interruption Table (VTOR)
         SCB->VTOR = PROGRAM_FLASH;
@@ -348,7 +373,10 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+        MX_GPIO_Init();
+        MX_DMA_Init();
         MX_USART2_UART_Init();
+        __enable_irq();
     }
   /* USER CODE END 3 */
 }
