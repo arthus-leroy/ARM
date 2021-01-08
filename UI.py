@@ -6,10 +6,11 @@ from tkinter.filedialog import askopenfilename
 from tkinter.messagebox import showerror, showinfo
 from threading import Thread
 from serial import Serial
+from math import ceil
 
 from nacl.hash import sha256
 from nacl.signing import SigningKey
-from nacl.encoding import HexEncoder
+from nacl.encoding import RawEncoder
 
 from sys import argv
 
@@ -17,7 +18,7 @@ NO_ERR				= 0
 ASSERT_ERR			= 1
 DMA_LATE			= 2
 CORRUPT				= 3
-WRONG_HASH			= 4
+WRONG_SIGN			= 4
 WRONG_PWD			= 5
 LOGIN_NOT_EXISTS	= 6
 
@@ -29,8 +30,7 @@ GET_LOGIN			= 5
 DEL_LOGIN			= 6
 QUIT				= 7
 
-# FIXME : set private key
-private_key = SigningKey(b"0123456789ABCDEF0123456789ABCDEF")
+key = SigningKey.generate()
 
 assert(len(argv) >= 3)
 com = argv[1]
@@ -76,8 +76,8 @@ def process_serial(skip):
 			showerror("DMA error", "The DMA reception was hindered. Try again.")
 		elif err == CORRUPT:
 			showerror("Corrution error", "Sent message was corrupted. Try again.")
-		elif err == WRONG_HASH:
-			showerror("Wrong hash", "The hash sent for the bootloader was wrong.")
+		elif err == WRONG_SIGN:
+			showerror("Wrong hash", "Incorrect signature.")
 		elif err == WRONG_PWD:
 			showerror("Wrong password", "Wrong master password : %s." %master_password.get())
 		elif err == LOGIN_NOT_EXISTS:
@@ -107,10 +107,11 @@ bootloader_path = StringVar(root)
 def send_bootloader():
 	with open(bootloader_path.get(), "rb") as f:
 		data = f.read()
-		h = HexEncoder.encode(sha256(data))
-		ch = HexEncoder.encode(private_key.sign(h, HexEncoder).signature)
+		h = sha256(data, RawEncoder)
+		ch = key.sign(h, RawEncoder).signature
+		verify_key = key.verify_key.encode()
 
-		ser.write(itob(len(data), 4) + data + ch + h)
+		ser.write(itob(len(data), 4) + data + ch + verify_key + h)
 
 master_password = StringVar(root)
 def send_tx_message(password, op, args):
