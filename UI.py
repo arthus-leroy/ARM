@@ -7,6 +7,7 @@ from tkinter.messagebox import showerror, showinfo
 from threading import Thread
 from serial import Serial
 from math import ceil
+from time import time
 
 from nacl.hash import sha256
 from nacl.signing import SigningKey
@@ -30,7 +31,8 @@ GET_LOGIN			= 5
 DEL_LOGIN			= 6
 QUIT				= 7
 
-key = SigningKey.generate()
+seed = "abcdefghijklmnopqrstuvwxyz012345".encode()
+key = SigningKey(seed)
 
 assert(len(argv) >= 3)
 com = argv[1]
@@ -45,14 +47,17 @@ def itob(num, size):
 
 def read_serial(skip):
 	while ser.in_waiting < 3:
+		# in the rare cases it could receive only 1 or 2 bytes
 		if skip():
 			return None, None
 
 	header = ser.read(3)
+	length = header[0]
 
-	print("(%s)" %header[0], end = ' ', flush = True)
-	while ser.in_waiting < header[0]:
-		if skip():
+	t = time() * 1000
+	while ser.in_waiting < length:
+		# waiting 1 ms per byte max
+		if time() * 1000 - t > length:
 			return None, None
 
 	args = ser.read(header[0])
@@ -63,7 +68,6 @@ answer_area = StringVar(root)
 def process_serial(skip):
 	while True:
 		ser.reset_input_buffer()
-		print("serial ", end = "", flush = True)
 
 		header, args = read_serial(skip)
 		if header == None:
@@ -101,17 +105,14 @@ def process_serial(skip):
 			else:
 				print(args.decode())
 
-		print("")
-
 bootloader_path = StringVar(root)
 def send_bootloader():
 	with open(bootloader_path.get(), "rb") as f:
 		data = f.read()
 		h = sha256(data, RawEncoder)
 		ch = key.sign(h, RawEncoder).signature
-		verify_key = key.verify_key.encode()
 
-		ser.write(itob(len(data), 4) + data + ch + verify_key + h)
+		ser.write(itob(len(data), 4) + data + ch + h)
 
 master_password = StringVar(root)
 def send_tx_message(password, op, args):

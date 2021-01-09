@@ -270,7 +270,7 @@ int main(void)
         crypto_hash_sha256_state hash;
         crypto_hash_sha256_init(&hash);
 
-//		send_dma_blocking(NO_ERR, "Begin");
+		send_dma_blocking(NO_ERR, "Begin");
 
         // STEP 1: Get size of the program
         unsigned size;
@@ -347,7 +347,7 @@ int main(void)
         // Deactivate interruptions
         __disable_irq();
 
-        // Deinit peripherals (TODO: forgot any ?)
+        // Deinit peripherals
         HAL_UART_DeInit(&huart2);
         HAL_GPIO_DeInit(LED_GPIO_Port, LED_Pin);
         __HAL_RCC_DMA1_CLK_DISABLE();
@@ -359,14 +359,15 @@ int main(void)
         SysTick->LOAD = 0;
         SysTick->VAL = 0;
 
+        static volatile void (*program)(void);
+        // reset handler is 5th to 8th bytes of the program
+        program = (volatile void (*)(void)) (PROGRAM_FLASH + 4);
+
         // Set Interruption Table (VTOR)
-        SCB->VTOR = PROGRAM_FLASH;
+        SCB->VTOR = *(volatile uint32_t*) PROGRAM_FLASH;
 
-        void (*program)(void);
-        program = (void (*)(void)) PROGRAM_FLASH + 4;
-
-        // Set stack pointer
-        __set_MSP(0);
+        // Set stack pointer (4 first bytes of the program)
+        __set_MSP(*(volatile uint32_t*) PROGRAM_FLASH);
 
         // Jump on the program
         program();
