@@ -41,6 +41,8 @@
 # define BASE_FLASH			0x8000000
 # define PROGRAM_FLASH		0x8040000	// sector 6 and 7
 # define SECTOR_SIZE		0x2000
+# define PUBLIC_KEY_SIZE 	crypto_sign_PUBLICKEYBYTES
+# define PRIVATE_KEY_SIZE 	crypto_sign_SECRETKEYBYTES
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -81,6 +83,10 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
     dma_sent = 1;
 }
+
+const unsigned char seed[32] = "abcdefghijklmnopqrstuvwxyz012345";
+unsigned char public_key[PUBLIC_KEY_SIZE];
+unsigned char private_key[PRIVATE_KEY_SIZE];
 
 // LEN, OP, ERR, ARGS..., HASH
 unsigned char tx[1024];
@@ -250,6 +256,7 @@ int main(void)
   MX_DMA_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+  crypto_sign_seed_keypair(public_key, private_key, seed);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -304,14 +311,7 @@ int main(void)
         while (dma_received == 0)
         	;
 
-        // STEP 4 : Receive verify key (signature's public key)
-        dma_received = 0;
-        unsigned char public_key[crypto_sign_PUBLICKEYBYTES];
-        HAL_UART_Receive_DMA(&huart2, public_key, crypto_sign_PUBLICKEYBYTES);
-        while (dma_received == 0)
-        	;
-
-        // STEP 5 : Receive integrity hash
+        // STEP 4 : Receive integrity hash
         dma_received = 0;
         unsigned char program_hash[crypto_hash_sha256_BYTES];
         HAL_UART_Receive_DMA(&huart2, program_hash, crypto_hash_sha256_BYTES);
@@ -342,6 +342,7 @@ int main(void)
             continue;
         }
 
+        volatile uint32_t addr = (volatile uint32_t) PROGRAM_FLASH;
 //        send_dma_blocking(NO_ERR, "TEST PASSED !");
 
         // Deactivate interruptions
@@ -359,15 +360,17 @@ int main(void)
         SysTick->LOAD = 0;
         SysTick->VAL = 0;
 
-        static volatile void (*program)(void);
-        // reset handler is 5th to 8th bytes of the program
-        program = (volatile void (*)(void)) (PROGRAM_FLASH + 4);
+        static void (*program)(void);
+        // Set reset handler (address is 1-4 bytes of the program)
+        program = (void (*)(void)) *(uint32_t*) (addr + 4);
 
         // Set Interruption Table (VTOR)
-        SCB->VTOR = *(volatile uint32_t*) PROGRAM_FLASH;
+        SCB->VTOR = addr;
 
-        // Set stack pointer (4 first bytes of the program)
-        __set_MSP(*(volatile uint32_t*) PROGRAM_FLASH);
+        // Set stack pointer (address is 5-8 bytes of the program)
+        __set_MSP(addr + *(uint32_t*) addr);
+
+        __DSB();
 
         // Jump on the program
         program();
