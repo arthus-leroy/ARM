@@ -31,6 +31,8 @@ GET_LOGIN			= 5
 DEL_LOGIN			= 6
 QUIT				= 7
 
+PUBLIC_KEY_SIZE			= 64
+MASTER_PASSWORD_SIZE	= 32
 seed = "abcdefghijklmnopqrstuvwxyz012345".encode()
 key = SigningKey(seed)
 
@@ -64,7 +66,8 @@ def read_serial(skip):
 
 	return header, args
 
-answer_area = StringVar(root)
+public_key_area = StringVar(root)
+signature_area = StringVar(root)
 def process_serial(skip):
 	while True:
 		ser.reset_input_buffer()
@@ -79,7 +82,7 @@ def process_serial(skip):
 		elif err == DMA_LATE:
 			showerror("DMA error", "The DMA reception was hindered. Try again.")
 		elif err == CORRUPT:
-			showerror("Corrution error", "Sent message was corrupted. Try again.")
+			showerror("Corrution error", "Message was corrupted. Try again.")
 		elif err == WRONG_SIGN:
 			showerror("Wrong hash", "Incorrect signature.")
 		elif err == WRONG_PWD:
@@ -89,11 +92,17 @@ def process_serial(skip):
 		else:
 			op = header[1]
 			if op == MOD_MAST_PWD:
-				showinfo("Info", "Master password changed")
 				master_password.set(master_password_mod.get())
-			elif op == SEND_KEY \
-			  or op == SIGN:
-				answer_area.set("".join("%02X" %a for a in args))
+				showinfo("Info", "Master password changed")
+			elif op == SEND_KEY:
+				key = "".join("%02X" %a for a in args)
+
+				if len(key) == PUBLIC_KEY_SIZE:
+					public_key_area.set(key)
+				else:
+					showerror("Corrupted key", "Key reception was corrupted")
+			elif op == SIGN:
+				signature_area.set("".join("%02X" %a for a in args))
 			elif op == ADD_LOGIN:
 				showinfo("Info", "Added password")
 			elif op == DEL_LOGIN:
@@ -103,7 +112,7 @@ def process_serial(skip):
 			elif op == QUIT:
 				showinfo("Info", "Returned to bootloader")
 			else:
-				print(args.decode())
+				print(args.decode(errors = "ignore"))
 
 bootloader_path = StringVar(root)
 def send_bootloader():
@@ -117,27 +126,29 @@ def send_bootloader():
 master_password = StringVar(root)
 def send_tx_message(password, op, args):
 	checksum = 0
+
 	for a in args:
 		checksum += a
 
-	if password:
-		master_pass = master_password.get().encode()
-		ser.write(itob(len(args), 1) + itob(op, 1) \
-			    + master_pass + args + itob(checksum, 1))
-	else:
-		ser.write(itob(len(args), 1) + itob(op, 1) \
-				+ args + itob(checksum, 1))
+	master_pass = master_password.get().encode() \
+				+ b'0' * (MASTER_PASSWORD_SIZE - len(master_password.get()))
+	p = master_pass if password else b''
+	ser.write(itob(len(args), 4) + itob(op, 1) + p + args + itob(checksum & 0xFF, 1))
 
 master_password_mod = StringVar(root)
 def modify_master_password():
 	send_tx_message(1, MOD_MAST_PWD, master_password_mod.get().encode())
 
 def send_key():
-	send_tx_message(1, SEND_KEY, b'')
+	send_tx_message(0, SEND_KEY, b'')
 
 sign_file_path = StringVar(root)
 def sign_file():
-	send_tx_message(1, SIGN, sign_file_path.get().encode())
+	try:
+		with open(sign_file_path.get().encode(), "rb") as f:
+			send_tx_message(1, SIGN, f.read())
+	except e:
+		print(e)
 
 login = StringVar(root)
 password = StringVar(root)
@@ -157,15 +168,15 @@ def del_login():
 def quit():
 	send_tx_message(0, QUIT, b'')
 
-def thread_stop():
-	b = getattr(thread_stop, "bool")
+def thread_skip():
+	b = getattr(thread_skip, "bool")
 	if b:
-		setattr(thread_stop, "bool", False)
+		setattr(thread_skip, "bool", False)
 
 	return b
 
-setattr(thread_stop, "bool", False)
-Thread(target = process_serial, args = (thread_stop,), daemon = True).start()
+setattr(thread_skip, "bool", False)
+Thread(target = process_serial, args = (thread_skip,), daemon = True).start()
 
 style = Style()
 for item in ("TFrame", "TButton", "TLabel"):
@@ -180,9 +191,8 @@ Button(bootloader, text = "...", command = lambda: bootloader_path.set(askopenfi
 Label(bootloader, text = "").grid(row = 2)
 Button(bootloader, text = "Send bootloader code", command = send_bootloader).grid(row = 3, sticky = W)
 Label(bootloader).grid(row = 4)
-Label(bootloader, textvariable = answer_area, relief = "groove").grid(row = 5, columnspan = 3, sticky = W+E)
-Label(bootloader, text = "").grid(row = 6)
-Button(bootloader, text = "Flush input buffer", command = lambda: setattr(thread_stop, "bool", True)).grid(row = 7, sticky = W+E)
+Label(bootloader, text = "").grid(row = 5)
+Button(bootloader, text = "Flush input buffer", command = lambda: setattr(thread_skip, "bool", True)).grid(row = 6, sticky = W+E)
 frame.add(bootloader, text = "Bootloader")
 
 manager = Frame(frame)
@@ -197,27 +207,28 @@ Button(manager, text = "Modify", command = modify_master_password).grid(row = 3,
 
 Label(manager, text = "").grid(row = 4)
 
-Button(manager, text = "Send public key", command = send_key).grid(row = 5, sticky = W)
+Button(manager, text = "Send public key", command = send_key).grid(row = 5, column = 0, sticky = W)
+Entry(manager, textvariable = public_key_area).grid(row = 5, column = 1, columnspan = 2, sticky = W+E)
 
 Label(manager, text = "").grid(row = 6)
 
 Label(manager, text = "Sign file:").grid(row = 7, sticky = W)
 Label(manager, textvariable = sign_file_path, relief = "groove").grid(row = 8, column = 0, columnspan = 2, sticky = W+E)
 Button(manager, text = "...", command = lambda: sign_file_path.set(askopenfilename())).grid(row = 8, column = 2)
+Button(manager, text = "Sign", command = sign_file).grid(row = 9, column = 0, sticky = W)
+Entry(manager, textvariable = signature_area).grid(row = 9, column = 1, columnspan = 2, sticky = W+E)
 
-Label(manager, text = "").grid(row = 9)
+Label(manager, text = "").grid(row = 10)
 
-Label(manager, text = "Login:").grid(row = 10, column = 0, sticky = W)
-Label(manager, text = "Password:").grid(row = 10, column = 1, sticky = W)
-Entry(manager, textvariable = login).grid(row = 11, column = 0, sticky = W+E, padx = (0, 15))
-Entry(manager, textvariable = password).grid(row = 11, column = 1, sticky = W+E)
-Button(manager, text = "Add", command = add_login).grid(row = 12, column = 0)
-Button(manager, text = "Get", command = get_login).grid(row = 12, column = 1)
-Button(manager, text = "Del", command = del_login).grid(row = 12, column = 2)
+Label(manager, text = "Login:").grid(row = 11, column = 0, sticky = W)
+Label(manager, text = "Password:").grid(row = 11, column = 1, sticky = W)
+Entry(manager, textvariable = login).grid(row = 12, column = 0, sticky = W+E, padx = (0, 15))
+Entry(manager, textvariable = password).grid(row = 12, column = 1, sticky = W+E)
+Button(manager, text = "Add", command = add_login).grid(row = 13, column = 0)
+Button(manager, text = "Get", command = get_login).grid(row = 13, column = 1)
+Button(manager, text = "Del", command = del_login).grid(row = 13, column = 2)
 
-Label(manager, text = "").grid(row = 13)
-
-Label(manager, textvariable = answer_area, relief = "groove").grid(row = 14, columnspan = 3, sticky = W+E)
+Label(manager, text = "").grid(row = 14)
 
 Button(manager, text = "Quit", command = quit).grid(row = 15, columnspan = 3, sticky = W+E)
 
