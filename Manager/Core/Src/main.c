@@ -37,6 +37,8 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+# define RX_HEADER_SIZE			5	// size (4 bytes), op (1 byte)
+# define TX_HEADER_SIZE			3	// size (1 byte), op (1 byte), error (1 byte)
 # define MASTER_PASSWORD_SIZE 	32
 # define PUBLIC_KEY_SIZE 		crypto_sign_PUBLICKEYBYTES
 # define PRIVATE_KEY_SIZE 		crypto_sign_SECRETKEYBYTES
@@ -102,9 +104,9 @@ unsigned long long sign_len;
 // FIXME: get the right pointer (a place or a way where ram won't get rewritten)
 unsigned char *password_buffer = (unsigned char*) 0x20008000;
 
-// LEN, OP, ERR, ARGS..., HASH
+// LEN (1), OP (1), ERR (1), ARGS..., HASH
 unsigned char tx[1024];
-// LEN, OP, ARGS..., HASH
+// LEN (4), OP (1), ARGS..., HASH
 unsigned char rx[1024];
 
 /// Checksum
@@ -134,21 +136,31 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 }
 
 /*========== RX/TX functions ==========*/
-int get_rx_args_size(void)
+unsigned get_rx_args_size(void)
 {
-    return rx[0];
+    return *(unsigned*) rx;
+}
+
+unsigned char get_rx_op(void)
+{
+	return rx[4];
 }
 
 unsigned char *get_rx_args(void)
 {
-    return rx + 2;
+    return rx + RX_HEADER_SIZE;
+}
+
+unsigned char *get_tx_args(void)
+{
+	return tx + TX_HEADER_SIZE;
 }
 
 void set_tx_header(const unsigned char err)
 {
-    tx[0] = 0;      // LEN
-    tx[1] = rx[1];  // OP
-    tx[2] = err;    // ERR
+    tx[0] = 0;      		// LEN
+    tx[1] = get_rx_op();	// OP
+    tx[2] = err;    		// ERR
 }
 
 void set_tx_error(const unsigned char err)
@@ -156,25 +168,13 @@ void set_tx_error(const unsigned char err)
     tx[2] = err;
 }
 
-void add_tx_arg(const unsigned char arg)
-{
-    // tx[0] == len
-    tx[tx[0]++] = arg;
-}
-
-void add_tx_args(unsigned char *buff, const unsigned size)
-{
-    for (unsigned i = 0; i < size; i++)
-        add_tx_arg(buff[i]);
-}
-
 void set_tx_checksum(void)
 {
     unsigned sum = 0;
     for (unsigned i = 0; i < tx[0]; i++)
-        sum += tx[3 + i];
+        sum += tx[TX_HEADER_SIZE + i];
 
-    tx[3 + tx[0]] = (unsigned char) sum;
+    tx[3 + tx[0]] = (unsigned char) (sum & 0xFF);
 }
 
 void send_dma(const int err, const char *format, ...)
@@ -191,9 +191,9 @@ void send_dma(const int err, const char *format, ...)
 
 	tx[1] = 0;
 	tx[2] = err;
-	tx[3 + tx[0]] = 0;	// won't bother with checksum, not really important
+	tx[TX_HEADER_SIZE + tx[0]] = 0;	// won't bother with checksum, not really important
 
-	HAL_UART_Transmit_DMA(&huart2, tx, 3 + tx[0] + 1);
+	HAL_UART_Transmit_DMA(&huart2, tx, TX_HEADER_SIZE + tx[0] + 1);
 }
 
 void send_dma_blocking(const int err, const char *format, ...)
@@ -212,9 +212,24 @@ void send_dma_blocking(const int err, const char *format, ...)
 
 	tx[1] = 0;
 	tx[2] = err;
-	tx[3 + tx[0]] = 0;	// won't bother with checksum, not really important
+	tx[TX_HEADER_SIZE + tx[0]] = 0;	// won't bother with checksum, not really important
 
-	HAL_UART_Transmit_DMA(&huart2, tx, 3 + tx[0] + 1);
+	HAL_UART_Transmit_DMA(&huart2, tx, TX_HEADER_SIZE + tx[0] + 1);
+
+	while (dma_sent == 0)
+		;
+}
+
+void send_error(const int err)
+{
+	dma_sent = 0;
+
+	tx[0] = 0;
+	tx[1] = 0;
+	tx[2] = err;
+	tx[TX_HEADER_SIZE] = 0;	// won't bother with checksum, not really important
+
+	HAL_UART_Transmit_DMA(&huart2, tx, TX_HEADER_SIZE + 1);
 
 	while (dma_sent == 0)
 		;
@@ -225,10 +240,10 @@ void assert(const char *code, const char *file, const unsigned line, const int r
     if (res == 0)
     {
     	set_tx_header(ASSERT_ERR);
-        tx[0] = sprintf((char*) tx + 3, "assertion \"%s\" failed: file \"%s\", line %d", code, file, line);
+        tx[0] = sprintf((char*) tx + TX_HEADER_SIZE, "assertion \"%s\" failed: file \"%s\", line %d", code, file, line);
         set_tx_checksum();
 
-        HAL_UART_Transmit_DMA(&huart2, tx, 2 + tx[0] + 1);
+        HAL_UART_Transmit_DMA(&huart2, tx, TX_HEADER_SIZE + tx[0] + 1);
 
         while (1)
         	;
@@ -357,6 +372,7 @@ void process_dma_frame(struct crypto_hash_sha256_state *hash,
     	crypto_hash_sha256_update(hash, buffer, size);
     	for (int i = 0; i < size; i++)
     		checksum += buffer[i];
+    	checksum &= 0xFF;
     }
 }
 
@@ -378,7 +394,7 @@ int receive_dma_frame(struct crypto_hash_sha256_state *hash,
 
     if (dma_received == 1)
     {
-        send_dma(DMA_LATE, NULL);
+        send_error(DMA_LATE);
         return 1;
     }
 
@@ -395,23 +411,6 @@ int process_request(const int op)
     const unsigned char *args = get_rx_args();
     const unsigned arg_size = get_rx_args_size();
 
-    if (use_password[op])
-    {
-    	if (arg_size < MASTER_PASSWORD_SIZE)
-    	{
-    		set_tx_header(CORRUPT);
-    		return 1;
-    	}
-
-    	if (strncmp((char*) args, (char*) master_password, MASTER_PASSWORD_SIZE))
-		{
-			set_tx_header(WRONG_PWD);
-			return 1;
-		}
-    }
-
-    set_tx_header(NO_ERR);
-
     int i;
     switch (op)
     {
@@ -419,19 +418,20 @@ int process_request(const int op)
             return 0;
 
         case MOD_MAST_PWD:
-            if (arg_size < 2 * MASTER_PASSWORD_SIZE)
+            if (arg_size < MASTER_PASSWORD_SIZE)
                 set_tx_error(CORRUPT);
             else
-                memcpy(master_password, args + MASTER_PASSWORD_SIZE, MASTER_PASSWORD_SIZE);
+                memcpy(master_password, args, MASTER_PASSWORD_SIZE);
             break;
 
         case SEND_KEY:
-            add_tx_args(public_key, PUBLIC_KEY_SIZE);
+        	memcpy(get_tx_args(), public_key, PUBLIC_KEY_SIZE);
+        	tx[0] = PUBLIC_KEY_SIZE;
             break;
 
         case SIGN:
-            crypto_sign(tx + 3, &sign_len, hash, HASH_SIZE, private_key);
-            tx[0] += sign_len;
+            crypto_sign_detached(tx + TX_HEADER_SIZE, &sign_len, hash, HASH_SIZE, private_key);
+            tx[0] = sign_len;
             break;
 
         case ADD_LOGIN:
@@ -445,8 +445,9 @@ int process_request(const int op)
                 break;
             }
 
-            add_tx_args(get_password(password_buffer + i),
-						get_password_len(password_buffer + i));
+            memcpy(get_tx_args(), get_password(password_buffer + i),
+				   get_password_len(password_buffer + i));
+            tx[0] = get_password_len(password_buffer + i);
             break;
 
         case DEL_LOGIN:
@@ -458,10 +459,18 @@ int process_request(const int op)
             return 0;
 
         default:
-            ASSERT(!"What the hell are you doing here ?");
+        	set_tx_error(CORRUPT);
     }
 
     return 1;
+}
+
+void send_hex(const unsigned char *buff, const unsigned len)
+{
+    char b[2 * len + 1];
+    for (unsigned i = 0; i < len; i++)
+    	sprintf(b + 2 * i, "%02X", buff[i]);
+    send_dma_blocking(NO_ERR, b);
 }
 
 /* USER CODE END 0 */
@@ -498,48 +507,52 @@ int main(void)
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
     // generate key pair at the beginning
+  	// as there is no RNG on the card, we must use a hardcoded seed
     crypto_sign_seed_keypair(public_key, private_key, seed);
-    send_dma(NO_ERR, "Welcome to the manager !");
+    send_dma_blocking(NO_ERR, "Welcome to the manager !");
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
     while (1)
     {
+    	HAL_Delay(100);
 		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+
+        struct crypto_hash_sha256_state state;
+		crypto_hash_sha256_init(&state);
 
     	// STEP 1 : fetch header
         dma_received = 0;
-        HAL_UART_Receive_DMA(&huart2, rx, 2);    // receive LEN and OP
+        HAL_UART_Receive_DMA(&huart2, rx, RX_HEADER_SIZE);    // receive LEN and OP
         while (dma_received == 0)
             ;
 
+        // beginning DMA reception
 		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
 
-        unsigned len = rx[0];
-        const unsigned op = rx[1];
+        unsigned len = get_rx_args_size();
+        const unsigned total_len = len;
+        const unsigned op = get_rx_op();
 
         checksum = 0;
 
-        // STEP 2 : fetch master password
+        // STEP 2 : fetch master password (if needed)
+        unsigned char master[MASTER_PASSWORD_SIZE];
         if (use_password[op])
         {
         	dma_received = 0;
-        	HAL_UART_Receive_DMA(&huart2, rx + 2, MASTER_PASSWORD_SIZE);
-        	len -= MASTER_PASSWORD_SIZE;
+        	HAL_UART_Receive_DMA(&huart2, master, MASTER_PASSWORD_SIZE);
         	while (dma_received == 0)
         		;
         }
 
         // STEP 3 : fetch arguments
-    	struct crypto_hash_sha256_state state;
         if (op == SIGN)
         {
-    		crypto_hash_sha256_init(&state);
-
     		int failed = 0;
-        	// len can be greater than DMA_BUFFER_SIZE, so we drive it
-        	// into separate buffers
+        	// len can be greater than the rx buffer, so we drive it
+        	// into separate buffers (dma1 and dma2)
         	for (; len > DMA_BUFFER_SIZE; len -= DMA_BUFFER_SIZE)
 				if (receive_dma_frame(&state, DMA_BUFFER_SIZE, 1))
 				{
@@ -557,8 +570,7 @@ int main(void)
         else if (len)
         {
         	dma_received = 0;
-        	const unsigned pos = 2 + (use_password[op] ? 32 : 0);
-        	HAL_UART_Receive_DMA(&huart2, rx + pos, len);
+        	HAL_UART_Receive_DMA(&huart2, rx + RX_HEADER_SIZE, len);
         	while (dma_received == 0)
         		;
         }
@@ -570,40 +582,47 @@ int main(void)
     	while (dma_received == 0)
     		;
 
+    	// ending DMA reception
 		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
-
-    	if (use_password[op])
-    		for (int i = 0; i < MASTER_PASSWORD_SIZE; i++)
-    			checksum += rx[2 + i];
 
         if (op == SIGN)
         {
-			// process 2 last frame after receiving all DMA
-	        process_dma_frame(&state, buff, DMA_BUFFER_SIZE);
-			process_dma_frame(&state, prev, len);
+			// process 2 last frame after receiving everything
+        	if (total_len > DMA_BUFFER_SIZE)
+        		process_dma_frame(&state, buff, DMA_BUFFER_SIZE);
+        	process_dma_frame(&state, prev, len);
 
 			crypto_hash_sha256_final(&state, hash);
         }
         else
         {
         	for (int i = 0; i < len; i++)
-        		checksum += rx[2 + i];
+        		checksum += rx[RX_HEADER_SIZE + i];
         }
 
-    	if (sum == (unsigned char) checksum)
+    	if (sum != (unsigned char) (checksum & 0xFF))
     	{
-            set_tx_header(CORRUPT);
-            return 1;
+            send_error(CORRUPT);
+            continue;
     	}
 
-        // STEP 4 : dispatch operation
+    	// STEP 5 : check master password if needed
+        if (use_password[op])
+        	if (memcmp(master, master_password, MASTER_PASSWORD_SIZE))
+    		{
+    			send_error(WRONG_PWD);
+    			continue;
+    		}
+
+        // STEP 6 : dispatch operation
+        set_tx_header(NO_ERR);
         if (process_request(op))
         {
             set_tx_checksum();
 
             dma_sent = 0;
-            // send header (2 bytes) + args + checksum (1 byte)
-            HAL_UART_Transmit_DMA(&huart2, tx, 2 + tx[0] + 1);
+            // send header (3 bytes) + args + checksum (1 byte)
+            HAL_UART_Transmit_DMA(&huart2, tx, TX_HEADER_SIZE + tx[0] + 1);
             while (dma_sent == 0)
             	;
         }
