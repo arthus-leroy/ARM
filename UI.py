@@ -17,11 +17,13 @@ from sys import argv
 
 NO_ERR				= 0
 ASSERT_ERR			= 1
-DMA_LATE			= 2
+DMA_ERROR			= 2
 CORRUPT				= 3
 WRONG_SIGN			= 4
-WRONG_PWD			= 5
-LOGIN_NOT_EXISTS	= 6
+INVALID_PROGRAM		= 5
+WRONG_PWD			= 6
+CANNOT_INSERT_LOGIN	= 7
+LOGIN_NOT_EXISTS	= 8
 
 MOD_MAST_PWD		= 1
 SEND_KEY			= 2
@@ -33,6 +35,7 @@ QUIT				= 7
 
 PUBLIC_KEY_SIZE			= 64
 MASTER_PASSWORD_SIZE	= 32
+# bootloader key
 seed = "abcdefghijklmnopqrstuvwxyz012345".encode()
 key = SigningKey(seed)
 
@@ -79,14 +82,18 @@ def process_serial(skip):
 		err = header[2]
 		if err == ASSERT_ERR:
 			showerror("Assertion Error", args.decode())
-		elif err == DMA_LATE:
-			showerror("DMA error", "The DMA reception was hindered. Try again.")
+		elif err == DMA_ERROR:
+			showerror("DMA error", "An error was encountered while transmitting the command. Try again.")
 		elif err == CORRUPT:
 			showerror("Corrution error", "Message was corrupted. Try again.")
 		elif err == WRONG_SIGN:
 			showerror("Wrong hash", "Incorrect signature.")
+		elif err == INVALID_PROGRAM:
+			showerror("Invalid program", "Stored program is invalid. Try sending it again.")
 		elif err == WRONG_PWD:
 			showerror("Wrong password", "Wrong master password : %s." %master_password.get())
+		elif err == CANNOT_INSERT_LOGIN:
+			showerror("Cannot insert login", "Couldn't insert login, there might not be any space left")
 		elif err == LOGIN_NOT_EXISTS:
 			showerror("Login does not exist", "The requested login does not exist")
 		else:
@@ -108,7 +115,7 @@ def process_serial(skip):
 			elif op == DEL_LOGIN:
 				showinfo("Info", "Deleted password")
 			elif op == GET_LOGIN:
-				answer_area.set(args.decode())
+				showinfo("Password", "Password of %s : %s" %(login.get(), args.decode()))
 			elif op == QUIT:
 				showinfo("Info", "Returned to bootloader")
 			else:
@@ -153,15 +160,27 @@ def sign_file():
 login = StringVar(root)
 password = StringVar(root)
 def add_login():
+	if len(login.get()) > 255 or len(password.get()) > 255:
+		showerror("Password and login must be 255 characters max")
+		return
+
 	login_pwd = login.get().encode() + b'\x00' \
 			  + password.get().encode() + b'\x00'
 	send_tx_message(1, ADD_LOGIN, login_pwd)
 
 def get_login():
+	if len(login.get()) > 255:
+		showerror("Password and login must be 255 characters max")
+		return
+
 	login_tab = login.get().encode() + b'\x00'
 	send_tx_message(1, GET_LOGIN, login_tab)
 
 def del_login():
+	if len(login.get()) > 255:
+		showerror("Password and login must be 255 characters max")
+		return
+
 	login_tab = login.get().encode() + b'\x00'
 	send_tx_message(1, DEL_LOGIN, login_tab)
 
