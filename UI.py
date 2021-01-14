@@ -123,12 +123,15 @@ def process_serial(skip):
 
 bootloader_path = StringVar(root)
 def send_bootloader():
-	with open(bootloader_path.get(), "rb") as f:
-		data = f.read()
-		h = sha256(data, RawEncoder)
-		ch = key.sign(h, RawEncoder).signature
+	try:
+		with open(bootloader_path.get(), "rb") as f:
+			data = f.read()
+			h = sha256(data, RawEncoder)
+			ch = key.sign(h, RawEncoder).signature
 
-		ser.write(itob(len(data), 4) + data + ch + h)
+			ser.write(itob(len(data), 4) + data + ch + h)
+	except:
+		showerror("Cannot find file \"%s\"" %bootloader_path.get())
 
 master_password = StringVar(root)
 def send_tx_message(password, op, args):
@@ -154,8 +157,8 @@ def sign_file():
 	try:
 		with open(sign_file_path.get().encode(), "rb") as f:
 			send_tx_message(1, SIGN, f.read())
-	except e:
-		print(e)
+	except:
+		showerror("Cannot find file \"%s\"" %sign_file_path.get())
 
 login = StringVar(root)
 password = StringVar(root)
