@@ -37,15 +37,17 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-# define DMA_BUFFER_SIZE	0x1000
-# define PUBLIC_KEY_SIZE 	crypto_sign_PUBLICKEYBYTES
-# define PRIVATE_KEY_SIZE 	crypto_sign_SECRETKEYBYTES
-# define HASH_SIZE			crypto_hash_sha256_BYTES
-# define SIGN_SIZE			crypto_sign_BYTES
+# define SUINT32				sizeof(uint32_t)
+# define DMA_BUFFER_SIZE		0x1000
+# define PUBLIC_KEY_SIZE 		crypto_sign_PUBLICKEYBYTES
+# define PRIVATE_KEY_SIZE 		crypto_sign_SECRETKEYBYTES
+# define HASH_SIZE				crypto_hash_sha256_BYTES
+# define SIGN_SIZE				crypto_sign_BYTES
 
-# define BASE_FLASH			0x8000000
-# define PROGRAM_BASE		0x8040000	// sector 6 and 7
-# define PROGRAM_FLASH		(PROGRAM_BASE + sizeof(unsigned) + SIGN_SIZE)
+# define PROGRAM_BASE			0x8040000	// sector 6 and 7
+# define PROGRAM_SIZE_ADDRESS	(PROGRAM_BASE)
+# define PROGRAM_SIGN_ADDRESS	(PROGRAM_SIZE_ADDRESS + SUINT32)
+# define PROGRAM_FLASH			(PROGRAM_SIGN_ADDRESS + SIGN_SIZE)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -103,7 +105,7 @@ unsigned char *buff = dma2;
 /// Previous dma buffer (received)
 unsigned char *prev = NULL;
 
-unsigned program_flash = PROGRAM_FLASH;
+unsigned program_flash;
 
 int dma_received = 0;
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
@@ -169,19 +171,17 @@ void send_error(const int err)
 		;
 }
 
-int process_dma_program(struct crypto_hash_sha256_state *hash,
-						 unsigned char *buff,
-                         int size)
+int process_dma_program(struct crypto_hash_sha256_state *hash, unsigned char *buff,
+						const unsigned size)
 {
     if (buff)
     {
-    	const unsigned s = size / sizeof(unsigned)
-    					 + (size % sizeof(unsigned) != 0);
-        crypto_hash_sha256_update(hash, buff, size);
-        for (int i = 0; i < s; i++)
-            if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD,
-                              program_flash + i * sizeof(unsigned),
-                              ((unsigned*) prev)[i]) != HAL_OK)
+    	crypto_hash_sha256_update(hash, buff, size);
+
+    	const uint32_t* b = (uint32_t*) buff;
+    	const unsigned s = size / SUINT32 + (size % SUINT32 != 0);
+    	for (int i = 0; i < s; i++)
+            if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, program_flash + i * SUINT32, b[i]) != HAL_OK)
             {
                 send_error(DMA_ERROR);
                 return 1;
@@ -195,6 +195,9 @@ int process_dma_program(struct crypto_hash_sha256_state *hash,
 
 int dma_timeout(unsigned ms)
 {
+	if (ms == 0)
+		return 0;
+
 	const uint32_t t = HAL_GetTick();
 	while (dma_received == 0)
 		if (HAL_GetTick() - t > ms)
@@ -257,26 +260,43 @@ void assert(const char *code, const char *file, const int line, const int err)
 	}
 }
 
+unsigned char get_hex(unsigned char i, const int part)
+{
+	i = part ? i % 16 : i / 16;
+
+	return i < 10 ? '0' + i : 'A' + i - 10;
+}
+
+void send_hex(const unsigned char *buff, const unsigned len)
+{
+    char b[2 * len + 1];
+    for (unsigned i = 0; i < len; i++)
+    {
+    	b[2 * i] = get_hex(buff[i], 0);
+    	b[2 * i + 1] = get_hex(buff[i], 1);
+    }
+    b[2 * len] = '\0';
+    send_dma_blocking(NO_ERR, b);
+}
+
 int launch_program()
 {
-	// FIXME: fix size not being valid
-	const uint32_t size = *(volatile uint32_t*) PROGRAM_BASE;
-//	unsigned char *crypted_hash = (unsigned char*) (PROGRAM_BASE + sizeof(uint32_t));
-
-//	send_dma_blocking(NO_ERR, "size = %u", size);
+	const uint32_t size = *(volatile uint32_t*) PROGRAM_SIZE_ADDRESS;
+	unsigned char *crypted_hash = (unsigned char*) PROGRAM_SIGN_ADDRESS;
 
 	unsigned char hash[HASH_SIZE];
 	crypto_hash_sha256(hash, (unsigned char*) PROGRAM_FLASH, size);
 
 	// check the validity of the program in flash
-//    if (crypto_sign_verify_detached(crypted_hash, hash, HASH_SIZE, public_key))
-//        return 1;
+    if (crypto_sign_verify_detached(crypted_hash, hash, HASH_SIZE, public_key))
+        return 1;
 
     // Deactivate interruptions
-    __disable_irq();
+//    __disable_irq();
 
     // Deinit peripherals
-    HAL_UART_DeInit(&huart2);
+/*
+	HAL_UART_DeInit(&huart2);
     __HAL_RCC_USART2_CLK_DISABLE();
     __HAL_RCC_USART2_FORCE_RESET();
     __HAL_RCC_USART2_RELEASE_RESET();
@@ -284,27 +304,24 @@ int launch_program()
 
     HAL_GPIO_DeInit(LED_GPIO_Port, LED_Pin);
     __HAL_RCC_GPIOA_CLK_DISABLE();
-
-    HAL_RCC_DeInit();
-    HAL_DeInit();
-
-    SysTick->CTRL = 0;
-    SysTick->LOAD = 0;
-    SysTick->VAL = 0;
-
-    void (*program)(void);
-    // Set reset handler (address is 5-8 bytes of the program)
-    program = (void (*)(void)) (volatile uint32_t*) (PROGRAM_FLASH + 4);
+*/
 
     // Set Interruption Table (VTOR)
-    SCB->VTOR = (volatile uint32_t) PROGRAM_FLASH;
+    SCB->VTOR = (uint32_t) PROGRAM_FLASH;
 
-    __HAL_RCC_SYSCFG_CLK_ENABLE();
-    __HAL_SYSCFG_REMAPMEMORY_SYSTEMFLASH();
+    // Set reset handler (address is 5-8 bytes of the program)
+    const volatile uint32_t pc = *(volatile uint32_t*) (PROGRAM_FLASH + 4);
+    void (*program)(void) = (void (*)(void)) pc;
 
     // Set stack pointer (address is 1-4 bytes of the program)
-    __set_MSP(*(volatile uint32_t*) PROGRAM_FLASH);
+    const volatile uint32_t sp = *(volatile uint32_t*) (PROGRAM_FLASH);
 
+//    __HAL_SYSCFG_REMAPMEMORY_SYSTEMFLASH();
+
+    __set_MSP(sp);
+
+//    __disable_irq();
+//    HAL_DeInit();
     // Jump on the program
     program();
 
@@ -349,14 +366,20 @@ int main(void)
   MX_DMA_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-  crypto_sign_seed_keypair(public_key, private_key, seed);
+    crypto_sign_seed_keypair(public_key, private_key, seed);
+	send_dma_blocking(NO_ERR, "Begin");
+	HAL_Delay(500);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
     while (1)
     {
-//    	launch_program();
+    	const int launch = HAL_GPIO_ReadPin(BUTTON_GPIO_Port, BUTTON_Pin);
+        if (launch && launch_program())
+        	send_error(INVALID_PROGRAM);
+
+    	program_flash = PROGRAM_FLASH;
 
         HAL_FLASH_Unlock();
 
@@ -372,18 +395,17 @@ int main(void)
         crypto_hash_sha256_state hash;
         crypto_hash_sha256_init(&hash);
 
-		send_dma_blocking(NO_ERR, "Begin");
-
         // STEP 1: Get size of the program
         uint32_t size;
         dma_received = 0;
-        HAL_UART_Receive_DMA(&huart2, (unsigned char*) &size, sizeof(uint32_t));
+        HAL_UART_Receive_DMA(&huart2, (unsigned char*) &size, SUINT32);
         while (dma_received == 0)
         	;
 
         const uint32_t total_size = size;
 
         // STEP 2: Receive and write the program
+        // untreated data are always in prev
         int failed = 0;
         for (; size > DMA_BUFFER_SIZE; size -= DMA_BUFFER_SIZE)
             if (receive_dma_program(&hash, DMA_BUFFER_SIZE, 1))
@@ -396,6 +418,7 @@ int main(void)
             continue;
 
         // receive last dma, but don't process anything
+        // untreated data are in buff -> prev
         if (receive_dma_program(&hash, size, 0))
             continue;
 
@@ -440,16 +463,13 @@ int main(void)
 
         HAL_FLASH_Unlock();
         // write size
-        HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, PROGRAM_BASE,
+        HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, PROGRAM_SIZE_ADDRESS,
                           total_size);
     	// write crypted hash
-        for (unsigned i = 0; i < SIGN_SIZE / sizeof(uint32_t); i++)
-        	HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, PROGRAM_BASE + i * sizeof(uint32_t),
-        					  *(((uint32_t*) program_crypted_hash) + i));
+        for (unsigned i = 0; i < SIGN_SIZE / SUINT32; i++)
+        	HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, PROGRAM_SIGN_ADDRESS + i * SUINT32,
+        					  *(uint32_t*) (program_crypted_hash + i * SUINT32));
         HAL_FLASH_Lock();
-
-        if (launch_program())
-        	send_error(INVALID_PROGRAM);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -558,10 +578,17 @@ static void MX_GPIO_Init(void)
   GPIO_InitTypeDef GPIO_InitStruct = {0};
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : BUTTON_Pin */
+  GPIO_InitStruct.Pin = BUTTON_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(BUTTON_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : LED_Pin */
   GPIO_InitStruct.Pin = LED_Pin;
