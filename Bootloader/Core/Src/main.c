@@ -37,17 +37,17 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-# define SUINT32				sizeof(uint32_t)
-# define DMA_BUFFER_SIZE		0x1000
-# define PUBLIC_KEY_SIZE 		crypto_sign_PUBLICKEYBYTES
-# define PRIVATE_KEY_SIZE 		crypto_sign_SECRETKEYBYTES
-# define HASH_SIZE				crypto_hash_sha256_BYTES
-# define SIGN_SIZE				crypto_sign_BYTES
+# define SUINT32                sizeof(uint32_t)
+# define DMA_BUFFER_SIZE        0x1000
+# define PUBLIC_KEY_SIZE        crypto_sign_PUBLICKEYBYTES
+# define PRIVATE_KEY_SIZE       crypto_sign_SECRETKEYBYTES
+# define HASH_SIZE              crypto_hash_sha256_BYTES
+# define SIGN_SIZE              crypto_sign_BYTES
 
-# define PROGRAM_BASE			0x8040000	// sector 6 and 7
-# define PROGRAM_SIZE_ADDRESS	(PROGRAM_BASE)
-# define PROGRAM_SIGN_ADDRESS	(PROGRAM_SIZE_ADDRESS + SUINT32)
-# define PROGRAM_FLASH			(PROGRAM_SIGN_ADDRESS + SIGN_SIZE)
+# define PROGRAM_BASE           0x8040000    // sector 6 and 7
+# define PROGRAM_SIZE_ADDRESS   (PROGRAM_BASE)
+# define PROGRAM_SIGN_ADDRESS   (PROGRAM_SIZE_ADDRESS + SUINT32)
+# define PROGRAM_FLASH          (PROGRAM_SIGN_ADDRESS + SIGN_SIZE)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -77,11 +77,11 @@ static void MX_USART2_UART_Init(void);
 enum TX_ERR
 {
     NO_ERR,
-	ASSERT_ERR,
-	DMA_ERROR,
+    ASSERT_ERR,
+    DMA_ERROR,
     CORRUPT,
-	WRONG_SIGN,
-	INVALID_PROGRAM,
+    WRONG_SIGN,
+    INVALID_PROGRAM,
 };
 
 int dma_sent = 0;
@@ -115,72 +115,72 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
 void send_dma(const int err, const char *format, ...)
 {
-	if (format)
-	{
-		va_list va;
-		va_start(va, format);
-		tx[0] = vsnprintf((char*) tx + 3, 1000, format, va);
-		va_end(va);
-	}
-	else
-		tx[0] = 0;
+    if (format)
+    {
+        va_list va;
+        va_start(va, format);
+        tx[0] = vsnprintf((char*) tx + 3, 1000, format, va);
+        va_end(va);
+    }
+    else
+        tx[0] = 0;
 
-	tx[1] = 0;
-	tx[2] = err;
-	tx[3 + tx[0]] = 0;	// won't bother with checksum, not really important
+    tx[1] = 0;
+    tx[2] = err;
+    tx[3 + tx[0]] = 0;    // won't bother with checksum, not really important
 
-	HAL_UART_Transmit_DMA(&huart2, tx, 3 + tx[0] + 1);
+    HAL_UART_Transmit_DMA(&huart2, tx, 3 + tx[0] + 1);
 }
 
 void send_dma_blocking(const int err, const char *format, ...)
 {
-	if (format)
-	{
-		va_list va;
-		va_start(va, format);
-		tx[0] = vsnprintf((char*) tx + 3, 1000, format, va);
-		va_end(va);
-	}
-	else
-		tx[0] = 0;
+    if (format)
+    {
+        va_list va;
+        va_start(va, format);
+        tx[0] = vsnprintf((char*) tx + 3, 1000, format, va);
+        va_end(va);
+    }
+    else
+        tx[0] = 0;
 
-	dma_sent = 0;
+    dma_sent = 0;
 
-	tx[1] = 0;
-	tx[2] = err;
-	tx[3 + tx[0]] = 0;	// won't bother with checksum, not really important
+    tx[1] = 0;
+    tx[2] = err;
+    tx[3 + tx[0]] = 0;    // won't bother with checksum, not really important
 
-	HAL_UART_Transmit_DMA(&huart2, tx, 3 + tx[0] + 1);
+    HAL_UART_Transmit_DMA(&huart2, tx, 3 + tx[0] + 1);
 
-	while (dma_sent == 0)
-		;
+    while (dma_sent == 0)
+        ;
 }
 
 void send_error(const int err)
 {
-	dma_sent = 0;
+    dma_sent = 0;
 
-	tx[0] = 0;
-	tx[1] = 0;
-	tx[2] = err;
-	tx[3 + tx[0]] = 0;	// won't bother with checksum, not really important
+    tx[0] = 0;
+    tx[1] = 0;
+    tx[2] = err;
+    tx[3 + tx[0]] = 0;    // won't bother with checksum, not really important
 
-	HAL_UART_Transmit_DMA(&huart2, tx, 3 + tx[0] + 1);
+    HAL_UART_Transmit_DMA(&huart2, tx, 3 + tx[0] + 1);
 
-	while (dma_sent == 0)
-		;
+    while (dma_sent == 0)
+        ;
 }
 
 int process_dma_program(struct crypto_hash_sha256_state *hash, unsigned char *buff,
-						const unsigned size)
+                        const unsigned size)
 {
     if (buff)
     {
-    	crypto_hash_sha256_update(hash, buff, size);
+        crypto_hash_sha256_update(hash, buff, size);
 
-    	const uint32_t* b = (uint32_t*) buff;
-    	const unsigned s = size / SUINT32 + (size % SUINT32 != 0);
-    	for (int i = 0; i < s; i++)
+        const uint32_t* b = (uint32_t*) buff;
+        const unsigned s = size / SUINT32 + (size % SUINT32 != 0);
+        for (int i = 0; i < s; i++)
             if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, program_flash + i * SUINT32, b[i]) != HAL_OK)
             {
                 send_error(DMA_ERROR);
@@ -195,19 +195,19 @@ int process_dma_program(struct crypto_hash_sha256_state *hash, unsigned char *bu
 
 int dma_timeout(unsigned ms)
 {
-	if (ms == 0)
-		return 0;
+    if (ms == 0)
+        return 0;
 
-	const uint32_t t = HAL_GetTick();
-	while (dma_received == 0)
-		if (HAL_GetTick() - t > ms)
-		{
-			HAL_UART_Abort(&huart2);
-			send_error(DMA_ERROR);
-			return 1;
-		}
+    const uint32_t t = HAL_GetTick();
+    while (dma_received == 0)
+        if (HAL_GetTick() - t > ms)
+        {
+            HAL_UART_Abort(&huart2);
+            send_error(DMA_ERROR);
+            return 1;
+        }
 
-	return 0;
+    return 0;
 }
 
 int receive_dma_program(struct crypto_hash_sha256_state *hash,
@@ -222,8 +222,8 @@ int receive_dma_program(struct crypto_hash_sha256_state *hash,
     }
 
     if (process)
-    	if (process_dma_program(hash, prev, DMA_BUFFER_SIZE))
-    		return 1;
+        if (process_dma_program(hash, prev, DMA_BUFFER_SIZE))
+            return 1;
 
     HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
 
@@ -239,32 +239,32 @@ int receive_dma_program(struct crypto_hash_sha256_state *hash,
     }
 
     if (dma_timeout(DMA_BUFFER_SIZE))
-    	return 1;
+        return 1;
 
     return 0;
 }
 
 void assert(const char *code, const char *file, const int line, const int err)
 {
-	if (err)
-	{
-		tx[0] = sprintf((char*) tx + 3, "assertion \"%s\" failed: file \"%s\", line %d", code, file, line);
-		tx[1] = 0;
-		tx[2] = ASSERT_ERR;
-		tx[3 + tx[0]] = 0;	// won't bother with checksum, not really important
+    if (err)
+    {
+        tx[0] = sprintf((char*) tx + 3, "assertion \"%s\" failed: file \"%s\", line %d", code, file, line);
+        tx[1] = 0;
+        tx[2] = ASSERT_ERR;
+        tx[3 + tx[0]] = 0;    // won't bother with checksum, not really important
 
-		HAL_UART_Transmit_DMA(&huart2, tx, 3 + tx[0] + 1);
+        HAL_UART_Transmit_DMA(&huart2, tx, 3 + tx[0] + 1);
 
-		while (1)
-			;
-	}
+        while (1)
+            ;
+    }
 }
 
 unsigned char get_hex(unsigned char i, const int part)
 {
-	i = part ? i % 16 : i / 16;
+    i = part ? i % 16 : i / 16;
 
-	return i < 10 ? '0' + i : 'A' + i - 10;
+    return i < 10 ? '0' + i : 'A' + i - 10;
 }
 
 void send_hex(const unsigned char *buff, const unsigned len)
@@ -272,8 +272,8 @@ void send_hex(const unsigned char *buff, const unsigned len)
     char b[2 * len + 1];
     for (unsigned i = 0; i < len; i++)
     {
-    	b[2 * i] = get_hex(buff[i], 0);
-    	b[2 * i + 1] = get_hex(buff[i], 1);
+        b[2 * i] = get_hex(buff[i], 0);
+        b[2 * i + 1] = get_hex(buff[i], 1);
     }
     b[2 * len] = '\0';
     send_dma_blocking(NO_ERR, b);
@@ -281,13 +281,13 @@ void send_hex(const unsigned char *buff, const unsigned len)
 
 int launch_program()
 {
-	const uint32_t size = *(volatile uint32_t*) PROGRAM_SIZE_ADDRESS;
-	unsigned char *crypted_hash = (unsigned char*) PROGRAM_SIGN_ADDRESS;
+    const uint32_t size = *(volatile uint32_t*) PROGRAM_SIZE_ADDRESS;
+    unsigned char *crypted_hash = (unsigned char*) PROGRAM_SIGN_ADDRESS;
 
-	unsigned char hash[HASH_SIZE];
-	crypto_hash_sha256(hash, (unsigned char*) PROGRAM_FLASH, size);
+    unsigned char hash[HASH_SIZE];
+    crypto_hash_sha256(hash, (unsigned char*) PROGRAM_FLASH, size);
 
-	// check the validity of the program in flash
+    // check the validity of the program in flash
     if (crypto_sign_verify_detached(crypted_hash, hash, HASH_SIZE, public_key))
         return 1;
 
@@ -296,7 +296,7 @@ int launch_program()
 
     // Deinit peripherals
 /*
-	HAL_UART_DeInit(&huart2);
+    HAL_UART_DeInit(&huart2);
     __HAL_RCC_USART2_CLK_DISABLE();
     __HAL_RCC_USART2_FORCE_RESET();
     __HAL_RCC_USART2_RELEASE_RESET();
@@ -367,30 +367,30 @@ int main(void)
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
     crypto_sign_seed_keypair(public_key, private_key, seed);
-	send_dma_blocking(NO_ERR, "Begin");
-	HAL_Delay(500);
+    send_dma_blocking(NO_ERR, "Begin");
+    HAL_Delay(500);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
     while (1)
     {
-    	const int launch = HAL_GPIO_ReadPin(BUTTON_GPIO_Port, BUTTON_Pin);
+        const int launch = HAL_GPIO_ReadPin(BUTTON_GPIO_Port, BUTTON_Pin);
         if (launch && launch_program())
-        	send_error(INVALID_PROGRAM);
+            send_error(INVALID_PROGRAM);
 
-    	program_flash = PROGRAM_FLASH;
+        program_flash = PROGRAM_FLASH;
 
         HAL_FLASH_Unlock();
 
         // FLASH size : 16 (0), 16, 16, 16, 64, 128, 128, 128 (7)
 
         // Erase sector 6 and 7 (256 KB), should be enough
-		FLASH_Erase_Sector(6, FLASH_VOLTAGE_RANGE_3);
-		FLASH_Erase_Sector(7, FLASH_VOLTAGE_RANGE_3);
-//		ASSERT( != HAL_OK)
-		while (FLASH->SR & FLASH_SR_BSY)
-			;
+        FLASH_Erase_Sector(6, FLASH_VOLTAGE_RANGE_3);
+        FLASH_Erase_Sector(7, FLASH_VOLTAGE_RANGE_3);
+//        ASSERT( != HAL_OK)
+        while (FLASH->SR & FLASH_SR_BSY)
+            ;
 
         crypto_hash_sha256_state hash;
         crypto_hash_sha256_init(&hash);
@@ -400,7 +400,7 @@ int main(void)
         dma_received = 0;
         HAL_UART_Receive_DMA(&huart2, (unsigned char*) &size, SUINT32);
         while (dma_received == 0)
-        	;
+            ;
 
         const uint32_t total_size = size;
 
@@ -429,14 +429,14 @@ int main(void)
         unsigned char program_crypted_hash[SIGN_SIZE];
         HAL_UART_Receive_DMA(&huart2, program_crypted_hash, SIGN_SIZE);
         if (dma_timeout(SIGN_SIZE))
-        	continue;
+            continue;
 
         // STEP 4 : Receive integrity hash
         dma_received = 0;
         unsigned char program_hash[HASH_SIZE];
         HAL_UART_Receive_DMA(&huart2, program_hash, HASH_SIZE);
         if (dma_timeout(HASH_SIZE))
-        	continue;
+            continue;
 
         // process 2 last dmas (delayed process to not hinder the reception)
         process_dma_program(&hash, buff, DMA_BUFFER_SIZE);
@@ -455,7 +455,7 @@ int main(void)
 
         // decrypt program_crypted_hash with public key
         if (crypto_sign_verify_detached(program_crypted_hash, program_hash,
-        								crypto_sign_PUBLICKEYBYTES, public_key))
+                                        crypto_sign_PUBLICKEYBYTES, public_key))
         {
             send_error(WRONG_SIGN);
             continue;
@@ -465,10 +465,10 @@ int main(void)
         // write size
         HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, PROGRAM_SIZE_ADDRESS,
                           total_size);
-    	// write crypted hash
+        // write crypted hash
         for (unsigned i = 0; i < SIGN_SIZE / SUINT32; i++)
-        	HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, PROGRAM_SIGN_ADDRESS + i * SUINT32,
-        					  *(uint32_t*) (program_crypted_hash + i * SUINT32));
+            HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, PROGRAM_SIGN_ADDRESS + i * SUINT32,
+                              *(uint32_t*) (program_crypted_hash + i * SUINT32));
         HAL_FLASH_Lock();
     /* USER CODE END WHILE */
 
