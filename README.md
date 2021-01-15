@@ -1,14 +1,14 @@
 # PROJET ARM
 
 ### Bootloader
-1 - Flasher le code
-2 - Lancer l'UI avec ./UI.py <chemin du tty> <baudrate> dans un terminal
-3 - Reset la carte avec le bouton noir
-4 - Attendre qu'un "Begin" s'affiche dans le terminal
-5 - Envoyer le Bootloader choisi si le boutton User est poussé
+1 - Flasher le code  
+2 - Lancer l'UI avec ./UI.py <chemin du tty> <baudrate> dans un terminal  
+3 - Reset la carte avec le bouton noir  
+4 - Attendre qu'un "Begin" s'affiche dans le terminal  
+5 - Envoyer le Bootloader choisi si le boutton User est poussé  
 
 Le boutton User permet d'envoyer un code au booloader au lieu de jump
-directement sur le code en flash.
+directement sur le code en flash.  
 Un bouton "Flush input buffer" est là pour les rares cas où un message
 arriverait incomplet et qu'on ne recevrait que 1 octet ou 2. Dans ce cas
 preci, le message suivant serait invalide.
@@ -18,14 +18,14 @@ le pc et sp sont corrects, mais le code ne se lance pas (meme en placant
 la flash de l'application à FLASH_PROGRAM).
 
 ### Manager
-1 - Flasher le code
-2 - Lancer l'UI avec ./UI.py <chemin du tty> <baudrate> dans un terminal
-3 - Reset la carte avec le bouton noir
-4 - Attendre qu'un "Welcome to the Manager !" s'affiche dans le terminal
+1 - Flasher le code  
+2 - Lancer l'UI avec ./UI.py <chemin du tty> <baudrate> dans un terminal  
+3 - Reset la carte avec le bouton noir  
+4 - Attendre qu'un "Welcome to the Manager !" s'affiche dans le terminal  
 
 Toute les operations, sauf l'envoie de la clé publique et le le fait de
 quitter le manager ont besoin du mot de passe principal. Il est possible
-de le modifier.
+de le modifier.  
 Les champs à coté de "Send public key" et "Sign" sont là pour afficher
 les informations reçues.
 
