@@ -47,7 +47,7 @@
 # define PROGRAM_BASE           0x8040000    // sector 6 and 7
 # define PROGRAM_SIZE_ADDRESS   (PROGRAM_BASE)
 # define PROGRAM_SIGN_ADDRESS   (PROGRAM_SIZE_ADDRESS + SUINT32)
-# define PROGRAM_FLASH          (PROGRAM_SIGN_ADDRESS + SIGN_SIZE)
+# define PROGRAM_FLASH          0x8040200
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
